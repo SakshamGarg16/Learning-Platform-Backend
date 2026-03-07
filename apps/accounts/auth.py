@@ -13,7 +13,11 @@ class AuthentikOIDCBackend(OIDCAuthenticationBackend):
         return user
 
     def update_user_info(self, user, claims):
-        # Authentik typically sends groups in the 'groups' claim
+        # DEBUG: See what Authentik is sending us!
+        print("--- OIDC CLAIMS RECEIVED ---")
+        print(claims)
+        print("---------------------------")
+        
         groups = claims.get('groups', [])
         
         # Admin logic: Check if user is in 'Admins' group in Authentik

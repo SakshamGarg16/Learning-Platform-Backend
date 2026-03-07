@@ -79,10 +79,35 @@ class ModuleSerializer(serializers.ModelSerializer):
 class TrackSerializer(serializers.ModelSerializer):
     modules = ModuleSerializer(many=True, read_only=True)
     progress_percentage = serializers.SerializerMethodField()
+    is_enrolled = serializers.SerializerMethodField()
+    is_creator = serializers.SerializerMethodField()
 
     class Meta:
         model = Track
-        fields = ['id', 'title', 'description', 'is_ai_generated', 'original_topic', 'created_at', 'modules', 'progress_percentage']
+        fields = ['id', 'title', 'description', 'is_ai_generated', 'original_topic', 'created_at', 'modules', 'progress_percentage', 'is_enrolled', 'is_creator']
+
+    def get_is_creator(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return False
+        return obj.created_by and obj.created_by.email == request.user.email
+
+    def get_is_enrolled(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return False
+            
+        from apps.accounts.models import Learner
+        from .models import TrackEnrollment
+        learner = Learner.objects.filter(email=request.user.email).first()
+        if not learner:
+            return False
+        
+        # If you are the creator, you never need to "enroll"
+        if obj.created_by == learner:
+            return True
+            
+        return TrackEnrollment.objects.filter(track=obj, learner=learner).exists()
 
     def get_progress_percentage(self, obj):
         request = self.context.get('request')

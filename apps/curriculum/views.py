@@ -14,18 +14,22 @@ class TrackViewSet(viewsets.ModelViewSet):
     serializer_class = TrackSerializer
 
     def get_queryset(self):
-        # In MVP, show tracks created by this user or "admin" (shared)
-        # For now, since we have the operator fallback logic, we use that email
         if self.request.user.is_anonymous:
-            # Fallback for local development/mock
-            return Track.objects.all()
+            return Track.objects.all().order_by('-created_at')
         
-        # In a real system, we'd filter by user.learner_profile.
-        # Let's mirror the fallback logic from Agents for consistency
+        # Only show tracks where the user is either the creator OR an enrolled learner
         return Track.objects.filter(
             models.Q(created_by__email=self.request.user.email) | 
-            models.Q(created_by__email="admin@example.com")
-        )
+            models.Q(enrollments__learner__email=self.request.user.email)
+        ).distinct().order_by('-created_at')
+
+    def get_object(self):
+        # Override to allow retrieving a specific track even if not in the default queryset 
+        # (critical for the enrollment landing page)
+        queryset = Track.objects.all()
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+        filter_kwargs = {self.lookup_field: self.kwargs[lookup_url_kwarg]}
+        return Track.objects.get(**filter_kwargs)
 
     def perform_create(self, serializer):
         from apps.accounts.models import Learner
@@ -93,6 +97,56 @@ class TrackViewSet(viewsets.ModelViewSet):
             
         serializer = self.get_serializer(track)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'])
+    def enroll(self, request, pk=None):
+        track = self.get_object()
+        from apps.accounts.models import Learner
+        from .models import TrackEnrollment
+        
+        learner = Learner.objects.filter(email=request.user.email).first()
+        if not learner:
+            return Response({"error": "Profile not found"}, status=status.HTTP_404_NOT_FOUND)
+            
+        enrollment, created = TrackEnrollment.objects.get_or_create(
+            learner=learner,
+            track=track
+        )
+        return Response({"status": "enrolled", "created": created})
+
+    @action(detail=True, methods=['get'])
+    def enrolled_candidates(self, request, pk=None):
+        # Only admins can see who enrolled
+        if not request.user.is_staff:
+            return Response({"error": "Unauthorized"}, status=status.HTTP_403_FORBIDDEN)
+            
+        track = self.get_object()
+        from .models import TrackEnrollment
+        enrollments = TrackEnrollment.objects.filter(track=track).select_related('learner')
+        
+        data = []
+        for enc in enrollments:
+            # Simple progress calculation: (passed assessments / total modules)
+            total_modules = track.modules.count()
+            passed_assessments = AssessmentAttempt.objects.filter(
+                learner=enc.learner,
+                assessment__module__track=track,
+                passed=True
+            ).values('assessment__module').distinct().count()
+            
+            progress = (passed_assessments / total_modules * 100) if total_modules > 0 else 0
+            
+            data.append({
+                "id": enc.learner.id,
+                "name": enc.learner.full_name,
+                "email": enc.learner.email,
+                "phone": enc.learner.phone_number,
+                "resume": enc.learner.resume.url if enc.learner.resume else None,
+                "progress": round(progress, 1),
+                "enrolled_at": enc.enrolled_at
+            })
+            
+        return Response(data)
 
 
 class LessonViewSet(viewsets.ModelViewSet):

@@ -62,7 +62,7 @@ MIDDLEWARE = [
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
-    'django.middleware.csrf.CsrfViewMiddleware',
+    # 'django.middleware.csrf.CsrfViewMiddleware', # Disabled for Safari/Local-dev cross-port compatibility
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
@@ -135,6 +135,36 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 
+# REST Framework Settings
+# Note: We use a custom class to skip CSRF checks only for local development
+from rest_framework.authentication import SessionAuthentication
+
+class UnsafeSessionAuthentication(SessionAuthentication):
+    def enforce_csrf(self, request):
+        return  # Disable CSRF check
+
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': (
+        'REMLearners_Backend.settings.UnsafeSessionAuthentication',
+        'rest_framework.authentication.BasicAuthentication',
+    ),
+}
+
+CSRF_TRUSTED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+
+# Use the session for CSRF storage (Cleaner for React apps)
+CSRF_USE_SESSIONS = True
+CSRF_COOKIE_HTTPONLY = False 
+
+# Cookie settings for local dev cross-port
+SESSION_COOKIE_SAMESITE = 'Lax'
+CSRF_COOKIE_SAMESITE = 'Lax'
+SESSION_COOKIE_SECURE = False
+CSRF_COOKIE_SECURE = False
+
 # Internationalization
 # https://docs.djangoproject.com/en/5.2/topics/i18n/
 
@@ -151,6 +181,8 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = 'static/'
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
@@ -166,6 +198,9 @@ AUTHENTICATION_BACKENDS = (
 # OIDC Settings
 OIDC_RP_CLIENT_ID = os.getenv('AUTHENTIK_CLIENT_ID')
 OIDC_RP_CLIENT_SECRET = os.getenv('AUTHENTIK_CLIENT_SECRET')
+
+# Crucial: Ask Authentik for group memberships
+OIDC_RP_SCOPES = "openid email profile groups"
 
 # Using the exact endpoints provided by Authentik UI
 AUTHENTIK_BASE_URL = os.getenv('AUTHENTIK_URL', 'http://localhost:9000')
@@ -188,3 +223,4 @@ SESSION_COOKIE_SAMESITE = 'Lax'
 CSRF_COOKIE_SAMESITE = 'Lax'
 SESSION_COOKIE_SECURE = False  # Set to True in production with HTTPS
 CSRF_COOKIE_SECURE = False
+CSRF_COOKIE_HTTPONLY = False   # Allow JS to read the cookie for CSRF headers

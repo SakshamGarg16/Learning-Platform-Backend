@@ -23,6 +23,10 @@ class Learner(models.Model):
     
     timezone = models.CharField(max_length=100, default='UTC')
     locale = models.CharField(max_length=10, default='en')
+    
+    phone_number = models.CharField(max_length=20, blank=True, null=True)
+    resume = models.FileField(upload_to='resumes/', null=True, blank=True)
+    profile_completed = models.BooleanField(default=False)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
