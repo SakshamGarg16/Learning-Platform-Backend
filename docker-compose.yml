@@ -1,0 +1,96 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: remlearners_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: remlearners_user
+      POSTGRES_PASSWORD: remlearners_password
+      POSTGRES_DB: remlearners_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: remlearners_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  # Authentik Stack
+  authentik-db:
+    image: postgres:15-alpine
+    container_name: authentik_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${PG_USER:-authentik}
+      POSTGRES_PASSWORD: ${PG_PASS:?database password required}
+      POSTGRES_DB: ${PG_DB:-authentik}
+    volumes:
+      - authentik_db_data:/var/lib/postgresql/data
+
+  authentik-redis:
+    image: redis:7-alpine
+    container_name: authentik_redis
+    command: --save 60 1 --loglevel warning
+    restart: always
+    volumes:
+      - authentik_redis_data:/data
+
+  authentik-server:
+    image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server:2024.12.3}
+    container_name: authentik_server
+    restart: always
+    command: server
+    environment:
+      AUTHENTIK_REDIS__HOST: authentik-redis
+      AUTHENTIK_POSTGRESQL__HOST: authentik-db
+      AUTHENTIK_POSTGRESQL__USER: ${PG_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__NAME: ${PG_DB:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS}
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY}
+    volumes:
+      - ./authentik/media:/media
+      - ./authentik/templates:/templates
+    ports:
+      - "9000:9000"
+      - "9443:9443"
+    depends_on:
+      - authentik-db
+      - authentik-redis
+
+  authentik-worker:
+    image: ${AUTHENTIK_IMAGE:-ghcr.io/goauthentik/server:2024.12.3}
+    container_name: authentik_worker
+    restart: always
+    command: worker
+    environment:
+      AUTHENTIK_REDIS__HOST: authentik-redis
+      AUTHENTIK_POSTGRESQL__HOST: authentik-db
+      AUTHENTIK_POSTGRESQL__USER: ${PG_USER:-authentik}
+      AUTHENTIK_POSTGRESQL__NAME: ${PG_DB:-authentik}
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${PG_PASS}
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY}
+    # This is optional, and can be removed if you don't need
+    # to healthcheck the worker
+    user: root
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./authentik/media:/media
+      - ./authentik/certs:/certs
+      - ./authentik/templates:/templates
+    depends_on:
+      - authentik-db
+      - authentik-redis
+
+volumes:
+  postgres_data:
+  redis_data:
+  authentik_db_data:
+  authentik_redis_data:
