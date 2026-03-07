@@ -102,3 +102,19 @@ class AssessmentAttempt(models.Model):
 
     def __str__(self):
         return f"{self.learner.email} - {self.assessment.title} - {self.score}"
+
+
+class PersonalizedLessonContent(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    lesson = models.ForeignKey(Lesson, on_delete=models.CASCADE, related_name='personalized_contents')
+    learner = models.ForeignKey(Learner, on_delete=models.CASCADE, related_name='personalized_lessons')
+    content = models.TextField(help_text="Personalized AI content for this specific learner")
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('lesson', 'learner')
+
+    def __str__(self):
+        return f"Personalized: {self.learner.email} - {self.lesson.title}"

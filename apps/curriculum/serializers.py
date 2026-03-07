@@ -2,9 +2,25 @@ from rest_framework import serializers
 from .models import Track, Module, Lesson, Assessment, AssessmentAttempt
 
 class LessonSerializer(serializers.ModelSerializer):
+    content = serializers.SerializerMethodField()
+    
     class Meta:
         model = Lesson
         fields = ['id', 'title', 'content', 'order']
+
+    def get_content(self, obj):
+        request = self.context.get('request')
+        if not request or request.user.is_anonymous:
+            return obj.content
+            
+        from apps.accounts.models import Learner
+        from .models import PersonalizedLessonContent
+        learner = Learner.objects.filter(email=request.user.email).first()
+        if not learner:
+            return obj.content
+            
+        pers = PersonalizedLessonContent.objects.filter(lesson=obj, learner=learner).first()
+        return pers.content if pers else obj.content
 
 
 class AssessmentSerializer(serializers.ModelSerializer):

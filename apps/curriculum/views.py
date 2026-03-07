@@ -5,6 +5,49 @@ from rest_framework.response import Response
 from .models import Track, Module, Lesson, Assessment, AssessmentAttempt
 from .serializers import TrackSerializer, ModuleSerializer, LessonSerializer, AssessmentSerializer, AssessmentAttemptSerializer
 from apps.ai_generation.services import generate_track_curriculum, generate_lesson_content, generate_assessment, analyze_assessment_failure
+import threading
+
+def background_generate_content(track_id, learner_id):
+    """
+    Background worker function (Threaded) to pre-generate all lessons 
+    in a track for a specific learner.
+    """
+    try:
+        from .models import Track, Lesson, TrackEnrollment, PersonalizedLessonContent
+        from apps.accounts.models import Learner
+        
+        track = Track.objects.get(id=track_id)
+        learner = Learner.objects.get(id=learner_id)
+        enrollment = TrackEnrollment.objects.filter(track=track, learner=learner).first()
+        
+        if not enrollment:
+            return
+            
+        summary = enrollment.personalized_summary
+        
+        # Traverse all modules and lessons
+        for module in track.modules.all():
+            for lesson in module.lessons.all():
+                # Check if already generated
+                if PersonalizedLessonContent.objects.filter(lesson=lesson, learner=learner).exists():
+                    continue
+                    
+                print(f"Background generating: {lesson.title} for {learner.email}")
+                
+                content = generate_lesson_content(
+                    track_title=track.title,
+                    module_title=module.title,
+                    lesson_title=lesson.title,
+                    learner_summary=summary
+                )
+                
+                PersonalizedLessonContent.objects.create(
+                    lesson=lesson,
+                    learner=learner,
+                    content=content
+                )
+    except Exception as e:
+        print(f"Background generation error: {e}")
 
 class ModuleViewSet(viewsets.ModelViewSet):
     queryset = Module.objects.all().prefetch_related('lessons', 'assessment')
@@ -128,6 +171,14 @@ class TrackViewSet(viewsets.ModelViewSet):
                 summary = analyze_resume_for_curriculum(learner.resume.path, overview)
                 enrollment.personalized_summary = summary
                 enrollment.save()
+                
+                # Start pre-generation in background
+                threading.Thread(
+                    target=background_generate_content, 
+                    args=(track.id, learner.id),
+                    daemon=True
+                ).start()
+                
             except Exception as e:
                 print(f"Personalization analysis failed: {e}")
 
@@ -177,7 +228,7 @@ class LessonViewSet(viewsets.ModelViewSet):
         lesson = self.get_object()
         
         # 1. Identify learner and personal summary for focus
-        from .models import TrackEnrollment
+        from .models import TrackEnrollment, PersonalizedLessonContent
         from apps.accounts.models import Learner
         
         learner = None
@@ -185,12 +236,19 @@ class LessonViewSet(viewsets.ModelViewSet):
             learner = Learner.objects.filter(email=self.request.user.email).first()
             
         learner_summary = None
+        enrollment = None
         if learner:
             enrollment = TrackEnrollment.objects.filter(learner=learner, track=lesson.module.track).first()
             if enrollment:
                 learner_summary = enrollment.personalized_summary
 
-        # 2. Generate rigorous, user-specific details
+        # 2. Check if already exists (Manual retry or parallel gen race)
+        if learner:
+            existing = PersonalizedLessonContent.objects.filter(lesson=lesson, learner=learner).first()
+            if existing:
+                return Response({"status": "already_exists", "content": existing.content})
+
+        # 3. Generate rigorous, user-specific details
         content = generate_lesson_content(
             track_title=lesson.module.track.title,
             module_title=lesson.module.title,
@@ -198,8 +256,16 @@ class LessonViewSet(viewsets.ModelViewSet):
             learner_summary=learner_summary
         )
         
-        lesson.content = content
-        lesson.save()
+        if learner:
+            PersonalizedLessonContent.objects.update_or_create(
+                lesson=lesson, 
+                learner=learner,
+                defaults={"content": content}
+            )
+        else:
+            lesson.content = content
+            lesson.save()
+
         return Response({"status": "generated", "content": content})
 
 
