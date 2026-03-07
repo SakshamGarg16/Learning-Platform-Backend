@@ -29,7 +29,10 @@ SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-lzm6lsbdl#mt1y9wljcw=rst=b
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.getenv('DEBUG', 'True') == 'True'
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', '[::1]']
+
+# Security Settings for OIDC
+SECURE_CROSS_ORIGIN_OPENER_POLICY = None # Allows the popup/redirect flow to work smoothly
 
 
 # Application definition
@@ -45,6 +48,7 @@ INSTALLED_APPS = [
     # Third-party apps
     'rest_framework',
     'corsheaders',
+    'mozilla_django_oidc',
 
     # Local apps
     'apps.accounts',
@@ -64,7 +68,15 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-CORS_ALLOW_ALL_ORIGINS = True # For MVP local development
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+]
+CORS_ALLOW_CREDENTIALS = True
+
+CSRF_TRUSTED_ORIGINS = [
+    "http://localhost:5173",
+]
 
 ROOT_URLCONF = 'REMLearners_Backend.urls'
 
@@ -144,3 +156,35 @@ STATIC_URL = 'static/'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# Authentication Backends
+AUTHENTICATION_BACKENDS = (
+    'apps.accounts.auth.AuthentikOIDCBackend',
+    'django.contrib.auth.backends.ModelBackend',
+)
+
+# OIDC Settings
+OIDC_RP_CLIENT_ID = os.getenv('AUTHENTIK_CLIENT_ID')
+OIDC_RP_CLIENT_SECRET = os.getenv('AUTHENTIK_CLIENT_SECRET')
+
+# Using the exact endpoints provided by Authentik UI
+AUTHENTIK_BASE_URL = os.getenv('AUTHENTIK_URL', 'http://localhost:9000')
+OIDC_OP_AUTHORIZATION_ENDPOINT = f"{AUTHENTIK_BASE_URL}/application/o/authorize/"
+OIDC_OP_TOKEN_ENDPOINT = f"{AUTHENTIK_BASE_URL}/application/o/token/"
+OIDC_OP_USER_ENDPOINT = f"{AUTHENTIK_BASE_URL}/application/o/userinfo/"
+OIDC_OP_JWKS_ENDPOINT = f"{AUTHENTIK_BASE_URL}/application/o/remlearner/jwks/"
+
+OIDC_RP_SIGN_ALGO = 'RS256'
+OIDC_STORE_ACCESS_TOKEN = True
+OIDC_STORE_ID_TOKEN = True
+OIDC_RP_CALLBACK_URL = 'http://localhost:8000/api/oidc/callback/'
+
+LOGIN_REDIRECT_URL = "http://localhost:5173/"
+LOGOUT_REDIRECT_URL = "http://localhost:5173/login"
+LOGIN_URL = "/api/oidc/authenticate/"
+
+# Session/Cookie settings for local OIDC
+SESSION_COOKIE_SAMESITE = 'Lax'
+CSRF_COOKIE_SAMESITE = 'Lax'
+SESSION_COOKIE_SECURE = False  # Set to True in production with HTTPS
+CSRF_COOKIE_SECURE = False

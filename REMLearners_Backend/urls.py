@@ -17,5 +17,7 @@ router.register(r'readiness', ReadinessSnapshotViewSet)
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('api/oidc/', include('mozilla_django_oidc.urls')),
     path('api/', include(router.urls)),
+    path('api/', include('apps.ai_generation.urls')),
 ]
