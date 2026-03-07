@@ -66,18 +66,34 @@ def generate_track_curriculum(topic: str) -> dict:
         return {}
 
 
-def generate_lesson_content(track_title: str, module_title: str, lesson_title: str) -> str:
+def generate_lesson_content(track_title: str, module_title: str, lesson_title: str, learner_summary: str = None) -> str:
     """
     Generates detailed, rigorous markdown content for a specific lesson.
+    If learner_summary is provided, it tailors the explanation to the user's specific background.
     """
     if not client:
         return "AI Client not configured."
         
+    personalization_prompt = ""
+    if learner_summary:
+        personalization_prompt = f"""
+        ### USER PERSONALIZATION CONTEXT (CRITICAL):
+        The following is a summary of the learner's existing background relative to this track:
+        \"\"\"{learner_summary}\"\"\"
+        
+        Use this context to make the lesson more relatable and effective:
+        1. **Analogies**: Where possible, compare new concepts to technologies or concepts the user already knows (as identified in the summary).
+        2. **Efficiency**: If the user is an expert in a related field, skip the basics and focus on the deltas and specific implementation details of this track.
+        3. **Tone**: Use an 'expert-to-expert' tone if the summary indicates high seniority.
+        """
+
     prompt = f"""
     You are an expert instructor.
     Track: {track_title}
     Module: {module_title}
     Lesson: {lesson_title}
+    
+    {personalization_prompt}
     
     Provide a detailed, rigorous, and highly educational explanation for this lesson.
     
@@ -219,3 +235,84 @@ def analyze_assessment_failure(module_title: str, questions_data: list, user_ans
     except Exception as e:
         print(f"Error parsing remedial JSON: {e}")
         return {}
+
+
+def _extract_text_from_file(file_path: str) -> str:
+    """Extracts plain text from PDF and DOCX files."""
+    ext = os.path.splitext(file_path)[1].lower()
+    text = ""
+    
+    try:
+        if ext == ".pdf":
+            import PyPDF2
+            with open(file_path, "rb") as f:
+                reader = PyPDF2.PdfReader(f)
+                for page in reader.pages:
+                    content = page.extract_text()
+                    if content:
+                        text += content + "\n"
+        elif ext in [".docx", ".doc"]:
+            import docx
+            doc = docx.Document(file_path)
+            for para in doc.paragraphs:
+                text += para.text + "\n"
+        else:
+            # Fallback for plain text
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                text = f.read()
+    except Exception as e:
+        print(f"Extraction failed for {file_path}: {e}")
+        return ""
+    
+    return text.strip()
+
+
+def analyze_resume_for_curriculum(resume_path: str, curriculum_overview: str) -> str:
+    """
+    Analyzes a candidate's background by extracting text from their resume 
+    and mapping it against the track curriculum.
+    """
+    if not client:
+        return "Analysis disabled: AI client not configured."
+        
+    # Extract text locally instead of uploading the whole binary file
+    resume_text = _extract_text_from_file(resume_path)
+    
+    if not resume_text:
+        return "Standard Analysis: Profile loaded (Resume content could not be extracted)."
+
+    try:
+        prompt = f"""
+        You are an AI placement consultant and senior technical mentor.
+        
+        ### CANDIDATE RESUME TEXT:
+        \"\"\"{resume_text[:4000]}\"\"\"  // Clipping to avoid token overflow for large files
+        
+        ### TARGET CURRICULUM:
+        {curriculum_overview}
+        
+        ### TASK:
+        Analyze the resume relative to the curriculum.
+        Provide a single, powerful paragraph summary that will be used for personalization.
+        
+        Focus on:
+        1. **Overlaps**: What do they already know? (Reference specific tech from their resume).
+        2. **Analogies**: Use concepts they know to explain the new ones (e.g., "Their React experience will make Django Templates feel easier").
+        3. **Confidence Level**: Use a tone appropriate for their seniority (Junior vs Principal).
+        
+        Return ONLY the summary paragraph. No labels or headers.
+        """
+        
+        response = client.models.generate_content(
+            model=DEFAULT_MODEL,
+            contents=prompt,
+            config=genai.types.GenerateContentConfig(
+                temperature=0.2,
+            ),
+        )
+        
+        return response.text
+        
+    except Exception as e:
+        print(f"Error analyzing resume: {e}")
+        return f"Standard Analysis: User profile loaded (AI analysis failed: {str(e)})"

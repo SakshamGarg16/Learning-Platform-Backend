@@ -26,6 +26,9 @@ class TrackEnrollment(models.Model):
     track = models.ForeignKey(Track, on_delete=models.CASCADE, related_name='enrollments')
     enrolled_at = models.DateTimeField(auto_now_add=True)
     
+    # AI generated summary of how this track relates to the learner's specific background (from resume)
+    personalized_summary = models.TextField(blank=True, help_text="Summary of how this curriculum relates to the learner's existing background (extracted via AI analysis)")
+    
     class Meta:
         unique_together = ('learner', 'track')
 

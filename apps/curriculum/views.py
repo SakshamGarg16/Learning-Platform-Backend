@@ -103,6 +103,7 @@ class TrackViewSet(viewsets.ModelViewSet):
         track = self.get_object()
         from apps.accounts.models import Learner
         from .models import TrackEnrollment
+        from apps.ai_generation.services import analyze_resume_for_curriculum
         
         learner = Learner.objects.filter(email=request.user.email).first()
         if not learner:
@@ -112,6 +113,24 @@ class TrackViewSet(viewsets.ModelViewSet):
             learner=learner,
             track=track
         )
+
+        # Trigger Personalized Background Analysis
+        if created and learner.resume:
+            # Prepare curriculum overview
+            modules = track.modules.all().prefetch_related('lessons')
+            overview = f"Track: {track.title}\nDescription: {track.description}\n"
+            for m in modules:
+                overview += f"- Module: {m.title}\n"
+                for l in m.lessons.all():
+                    overview += f"  - Lesson: {l.title}\n"
+            
+            try:
+                summary = analyze_resume_for_curriculum(learner.resume.path, overview)
+                enrollment.personalized_summary = summary
+                enrollment.save()
+            except Exception as e:
+                print(f"Personalization analysis failed: {e}")
+
         return Response({"status": "enrolled", "created": created})
 
     @action(detail=True, methods=['get'])
@@ -157,11 +176,26 @@ class LessonViewSet(viewsets.ModelViewSet):
     def generate_content(self, request, pk=None):
         lesson = self.get_object()
         
-        # Generate rigorous details
+        # 1. Identify learner and personal summary for focus
+        from .models import TrackEnrollment
+        from apps.accounts.models import Learner
+        
+        learner = None
+        if not self.request.user.is_anonymous:
+            learner = Learner.objects.filter(email=self.request.user.email).first()
+            
+        learner_summary = None
+        if learner:
+            enrollment = TrackEnrollment.objects.filter(learner=learner, track=lesson.module.track).first()
+            if enrollment:
+                learner_summary = enrollment.personalized_summary
+
+        # 2. Generate rigorous, user-specific details
         content = generate_lesson_content(
             track_title=lesson.module.track.title,
             module_title=lesson.module.title,
-            lesson_title=lesson.title
+            lesson_title=lesson.title,
+            learner_summary=learner_summary
         )
         
         lesson.content = content
