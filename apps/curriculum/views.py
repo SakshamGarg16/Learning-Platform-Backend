@@ -242,6 +242,71 @@ class TrackViewSet(viewsets.ModelViewSet):
             
         return Response(data)
 
+    @action(detail=True, methods=['get'], url_path='candidate_dossier/(?P<learner_id>[^/.]+)')
+    def candidate_dossier(self, request, pk=None, learner_id=None):
+        if not request.user.is_staff:
+            return Response({"error": "Unauthorized"}, status=status.HTTP_403_FORBIDDEN)
+            
+        track = self.get_object()
+        from apps.accounts.models import Learner
+        from django.shortcuts import get_object_or_404
+        from .models import TrackEnrollment, AssessmentAttempt, PersonalizedLessonContent
+        
+        learner = get_object_or_404(Learner, id=learner_id)
+        enrollment = TrackEnrollment.objects.filter(track=track, learner=learner).first()
+        
+        if not enrollment:
+            return Response({"error": "Learner not enrolled in this track"}, status=status.HTTP_404_NOT_FOUND)
+            
+        modules_data = []
+        for module in track.modules.all():
+            lessons_data = []
+            for lesson in module.lessons.all():
+                pers_content = PersonalizedLessonContent.objects.filter(lesson=lesson, learner=learner).first()
+                lessons_data.append({
+                    "id": lesson.id,
+                    "title": lesson.title,
+                    "has_personalized_content": pers_content is not None,
+                    "content": pers_content.content if pers_content else lesson.content
+                })
+            
+            assessment = getattr(module, 'assessment', None)
+            attempts_data = []
+            if assessment:
+                attempts = AssessmentAttempt.objects.filter(assessment=assessment, learner=learner).order_by('-created_at')
+                for attempt in attempts:
+                    attempts_data.append({
+                        "id": attempt.id,
+                        "score": attempt.score,
+                        "passed": attempt.passed,
+                        "ai_feedback": attempt.ai_feedback,
+                        "answers": attempt.answers_data,
+                        "created_at": attempt.created_at
+                    })
+            
+            modules_data.append({
+                "id": module.id,
+                "title": module.title,
+                "lessons": lessons_data,
+                "assessment": {
+                    "id": assessment.id if assessment else None,
+                    "questions": assessment.questions_data if assessment else [],
+                    "attempts": attempts_data
+                } if assessment else None
+            })
+            
+        return Response({
+            "learner": {
+                "id": learner.id,
+                "name": learner.full_name,
+                "email": learner.email,
+                "phone": learner.phone_number,
+                "resume": learner.resume.url if learner.resume else None,
+            },
+            "personalized_summary": enrollment.personalized_summary,
+            "modules": modules_data
+        })
+
 
 class LessonViewSet(viewsets.ModelViewSet):
     queryset = Lesson.objects.all()
@@ -333,6 +398,14 @@ class AssessmentViewSet(viewsets.ModelViewSet):
                 )
         
         learner_id = learner.id
+        
+        # Check for existing attempt to prevent retakes
+        existing_attempt = AssessmentAttempt.objects.filter(assessment=assessment, learner=learner).first()
+        if existing_attempt:
+            return Response(
+                {"error": "This assessment has already been completed.", "attempt": AssessmentAttemptSerializer(existing_attempt).data}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
             
         questions = assessment.questions_data
         correct_count = 0

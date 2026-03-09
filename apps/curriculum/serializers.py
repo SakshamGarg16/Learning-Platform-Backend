@@ -23,10 +23,38 @@ class LessonSerializer(serializers.ModelSerializer):
         return pers.content if pers else obj.content
 
 
+class AssessmentAttemptSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AssessmentAttempt
+        fields = ['id', 'learner', 'assessment', 'answers_data', 'score', 'passed', 'ai_feedback', 'remedial_module_generated', 'created_at']
+        read_only_fields = ['score', 'passed', 'ai_feedback', 'remedial_module_generated', 'created_at']
+
+
 class AssessmentSerializer(serializers.ModelSerializer):
+    user_latest_attempt = serializers.SerializerMethodField()
+    
     class Meta:
         model = Assessment
-        fields = ['id', 'title', 'questions_data']
+        fields = ['id', 'title', 'questions_data', 'user_latest_attempt']
+
+    def get_user_latest_attempt(self, obj):
+        request = self.context.get('request')
+        if not request or request.user.is_anonymous:
+            return None
+            
+        from apps.accounts.models import Learner
+        learner = Learner.objects.filter(email=request.user.email).first()
+        if not learner:
+            # Fallback for MVP local environments
+            learner = Learner.objects.filter(email="operator@example.com").first()
+            
+        if not learner:
+            return None
+            
+        attempt = AssessmentAttempt.objects.filter(assessment=obj, learner=learner).order_by('-created_at').first()
+        if attempt:
+            return AssessmentAttemptSerializer(attempt).data
+        return None
 
 
 class ModuleSerializer(serializers.ModelSerializer):
@@ -150,9 +178,4 @@ class TrackSerializer(serializers.ModelSerializer):
         
         return round((completed_count / total_modules) * 100)
 
-
-class AssessmentAttemptSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = AssessmentAttempt
-        fields = ['id', 'learner', 'assessment', 'answers_data', 'score', 'passed', 'ai_feedback', 'remedial_module_generated']
-        read_only_fields = ['score', 'passed', 'ai_feedback', 'remedial_module_generated']
+        return round((completed_count / total_modules) * 100)
