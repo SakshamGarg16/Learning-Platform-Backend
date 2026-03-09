@@ -191,7 +191,7 @@ STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
-MEDIA_URL = '/media/'
+MEDIA_URL = '/api/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
 # Default primary key field type
@@ -230,7 +230,7 @@ OIDC_RP_CALLBACK_URL = f"{_BACKEND_URL}/api/oidc/callback/"
 
 LOGIN_REDIRECT_URL = f"{_FRONTEND_URL}/"
 LOGOUT_REDIRECT_URL = f"{_FRONTEND_URL}/login"
-LOGIN_URL = "/api/oidc/authenticate/"
+LOGIN_URL = "/oidc/authenticate/"
 
 # Session/Cookie settings for local OIDC
 SESSION_COOKIE_SAMESITE = 'Lax'
