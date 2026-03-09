@@ -95,13 +95,9 @@ class TrackViewSet(viewsets.ModelViewSet):
         if not topic:
             return Response({"error": "Topic is required"}, status=status.HTTP_400_BAD_REQUEST)
         
-        # 1. Ask Gemini to generate track and modules
-        curriculum_data = generate_track_curriculum(topic)
-        if not curriculum_data:
-            return Response({"error": "Failed to generate curriculum"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-            
-        # 2. Save to database
         from apps.accounts.models import Learner
+        from apps.ai_generation.services import analyze_resume_for_background
+        
         learner = None
         if not self.request.user.is_anonymous:
             learner = Learner.objects.filter(email=self.request.user.email).first()
@@ -112,6 +108,20 @@ class TrackViewSet(viewsets.ModelViewSet):
                 defaults={"full_name": "MVP Operator", "auth_user_id": "mvp_operator"}
             )
 
+        # 1. Structural Personalization: Use resume to influence the syllabus
+        learner_summary = None
+        if learner.resume:
+            try:
+                learner_summary = analyze_resume_for_background(learner.resume.path)
+            except Exception as e:
+                print(f"Background analysis failed for generation: {e}")
+
+        # 2. Ask Gemini to generate track and modules (with background context)
+        curriculum_data = generate_track_curriculum(topic, learner_summary)
+        if not curriculum_data:
+            return Response({"error": "Failed to generate curriculum"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+        # 3. Save to database
         track = Track.objects.create(
             title=curriculum_data.get('title', f"{topic} Track"),
             description=curriculum_data.get('description', ""),
@@ -135,9 +145,23 @@ class TrackViewSet(viewsets.ModelViewSet):
                     order=l_idx
                 )
                 
-            # Create a stub assessment that can be populated later
             Assessment.objects.create(module=module, title=f"Assessment: {module.title}")
-            
+
+        # 4. Auto-enroll the creator and store the background summary
+        from .models import TrackEnrollment
+        enrollment, _ = TrackEnrollment.objects.get_or_create(
+            learner=learner,
+            track=track,
+            defaults={"personalized_summary": learner_summary or ""}
+        )
+
+        # 5. Immediate Background Pre-generation for all lessons
+        threading.Thread(
+            target=background_generate_content, 
+            args=(track.id, learner.id),
+            daemon=True
+        ).start()
+
         serializer = self.get_serializer(track)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 

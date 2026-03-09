@@ -16,16 +16,29 @@ except Exception as e:
 DEFAULT_MODEL = "gemini-3-flash-preview"
 
 
-def generate_track_curriculum(topic: str) -> dict:
+def generate_track_curriculum(topic: str, learner_summary: str = None) -> dict:
     """
     Generates a structured curriculum (Track -> Modules -> Lessons) for a given topic.
-    Returns a dictionary parsed from the JSON response.
     """
     if not client:
         return {}
         
+    personalization_context = ""
+    if learner_summary:
+        personalization_context = f"""
+        ### LEARNER BACKGROUND CONTEXT:
+        {learner_summary}
+        
+        ### CUSTOMIZATION INSTRUCTIONS:
+        1. **Avoid Redundancy**: If the learner is already expert in parts of "{topic}", shift the focus to advanced or delta concepts.
+        2. **Bridge Gaps**: Use their existing tech stack to create a faster learning path (e.g., if they know SQL, don't teach "What is a database", teach "How this tech manages data compared to SQL").
+        3. **Tone & Depth**: Adjust the complexity of modules based on their seniority.
+        """
+
     prompt = f"""
     You are an expert curriculum designer. The user wants to learn about: "{topic}".
+    {personalization_context}
+    
     Design a comprehensive learning track. Break it down into 3-5 Modules.
     For each Module, provide 3-5 Lessons.
     
@@ -62,7 +75,6 @@ def generate_track_curriculum(topic: str) -> dict:
         return json.loads(response.text)
     except Exception as e:
         print(f"Error parsing JSON from Gemini: {e}")
-        print(f"Raw response: {response.text}")
         return {}
 
 
@@ -113,8 +125,9 @@ def generate_lesson_content(track_title: str, module_title: str, lesson_title: s
     5. **Understanding (Crucial)**: 
        - For every core technical concept, include a **Mermaid diagram**.
        - **No Block Chatter**: The Mermaid block MUST start immediately with the graph type (e.g., `graph TD`). NO titles, NO comments, NO plain text inside the backticks.
-       - **Mermaid Golden Rule**: Wrap ALL node labels in double quotes (e.g., `A["Label"]`).
-       - **Nested Content (ZERO TOLERANCE)**: NEVER use quotes (`"` or `'`), backticks (`` ` ``), parentheses `()`, or brackets `[]` inside a Mermaid label. Use plain alphabetic text only.
+       - **Mermaid Golden Rule**: ALWAYS use explicit alphanumeric IDs and wrap labels in double quotes. 
+         FORMAT: `ID["Label Text"]` (e.g., `A["State Change"] --> B["Proxy Intercept"]`).
+       - **Nested Content (STRICT BAN)**: NEVER use quotes (`"` or `'`), backticks (`` ` ``), parentheses `()`, or brackets `[]` inside a Mermaid label. Use plain descriptive text ONLY.
        - **Arrows**: Use standard lowercase arrows: `-->`, `---`, `-.-`, `==>`, `--x`, `--o`.
        - **Complexity**: Keep diagrams focused (max 8 nodes).
     6. **Tone**: Rigorous and professional.
@@ -267,15 +280,14 @@ def _extract_text_from_file(file_path: str) -> str:
     return text.strip()
 
 
-def analyze_resume_for_curriculum(resume_path: str, curriculum_overview: str) -> str:
+def analyze_resume_for_background(resume_path: str) -> str:
     """
-    Analyzes a candidate's background by extracting text from their resume 
-    and mapping it against the track curriculum.
+    Analyzes a candidate's background by extracting text from their resume.
+    Returns a summary text used for both structural curriculum generation AND lesson content personalization.
     """
     if not client:
         return "Analysis disabled: AI client not configured."
         
-    # Extract text locally instead of uploading the whole binary file
     resume_text = _extract_text_from_file(resume_path)
     
     if not resume_text:
@@ -283,24 +295,19 @@ def analyze_resume_for_curriculum(resume_path: str, curriculum_overview: str) ->
 
     try:
         prompt = f"""
-        You are an AI placement consultant and senior technical mentor.
+        You are an AI technical mentor. Analyze the following resume text.
         
-        ### CANDIDATE RESUME TEXT:
-        \"\"\"{resume_text[:4000]}\"\"\"  // Clipping to avoid token overflow for large files
-        
-        ### TARGET CURRICULUM:
-        {curriculum_overview}
+        ### RESUME:
+        {resume_text[:4000]}
         
         ### TASK:
-        Analyze the resume relative to the curriculum.
-        Provide a single, powerful paragraph summary that will be used for personalization.
+        Provide a concise technical summary of this person.
+        Identify:
+        1. Their 3 strongest technologies.
+        2. Their general seniority level.
+        3. Tech stacks they are NOT familiar with but are related to their field.
         
-        Focus on:
-        1. **Overlaps**: What do they already know? (Reference specific tech from their resume).
-        2. **Analogies**: Use concepts they know to explain the new ones (e.g., "Their React experience will make Django Templates feel easier").
-        3. **Confidence Level**: Use a tone appropriate for their seniority (Junior vs Principal).
-        
-        Return ONLY the summary paragraph. No labels or headers.
+        Return a single paragraph for use as LLM context.
         """
         
         response = client.models.generate_content(
@@ -310,9 +317,15 @@ def analyze_resume_for_curriculum(resume_path: str, curriculum_overview: str) ->
                 temperature=0.2,
             ),
         )
-        
         return response.text
         
     except Exception as e:
-        print(f"Error analyzing resume: {e}")
-        return f"Standard Analysis: User profile loaded (AI analysis failed: {str(e)})"
+        print(f"Error analyzing background: {e}")
+        return "User profile loaded with standard settings."
+
+
+def analyze_resume_for_curriculum(resume_path: str, curriculum_overview: str) -> str:
+    """
+    DEPRECATED: Use the more general analyze_resume_for_background instead.
+    """
+    return analyze_resume_for_background(resume_path)

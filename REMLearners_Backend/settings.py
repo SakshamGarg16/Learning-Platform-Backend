@@ -13,6 +13,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+import dj_database_url
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -30,6 +31,10 @@ SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-lzm6lsbdl#mt1y9wljcw=rst=b
 DEBUG = os.getenv('DEBUG', 'True') == 'True'
 
 ALLOWED_HOSTS = ['localhost', '127.0.0.1', '[::1]']
+if os.getenv('BACKEND_URL'):
+    ALLOWED_HOSTS.append(os.getenv('BACKEND_URL').replace('https://', '').replace('http://', '').split('/')[0])
+if os.getenv('ALLOWED_HOSTS_PROD'):
+    ALLOWED_HOSTS.extend(os.getenv('ALLOWED_HOSTS_PROD').split(','))
 
 # Security Settings for OIDC
 SECURE_CROSS_ORIGIN_OPENER_POLICY = None # Allows the popup/redirect flow to work smoothly
@@ -59,6 +64,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -72,6 +78,8 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://localhost:3000",
 ]
+if os.getenv('FRONTEND_URL'):
+    CORS_ALLOWED_ORIGINS.append(os.getenv('FRONTEND_URL').rstrip('/'))
 CORS_ALLOW_CREDENTIALS = True
 
 CSRF_TRUSTED_ORIGINS = [
@@ -101,15 +109,12 @@ WSGI_APPLICATION = 'REMLearners_Backend.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
+# Default to local dev, use DATABASE_URL if present (Production/Docker)
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.getenv('DB_NAME', 'remlearners_db'),
-        'USER': os.getenv('DB_USER', 'remlearners_user'),
-        'PASSWORD': os.getenv('DB_PASSWORD', 'remlearners_password'),
-        'HOST': os.getenv('DB_HOST', 'localhost'),
-        'PORT': os.getenv('DB_PORT', '5432'),
-    }
+    'default': dj_database_url.config(
+        default=f"postgres://{os.getenv('DB_USER', 'remlearners_user')}:{os.getenv('DB_PASSWORD', 'remlearners_password')}@{os.getenv('DB_HOST', 'localhost')}:{os.getenv('DB_PORT', '5432')}/{os.getenv('DB_NAME', 'remlearners_db')}",
+        conn_max_age=600
+    )
 }
 
 # External Services
@@ -154,6 +159,8 @@ CSRF_TRUSTED_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 ]
+if os.getenv('FRONTEND_URL'):
+    CSRF_TRUSTED_ORIGINS.append(os.getenv('FRONTEND_URL').rstrip('/'))
 
 # Use the session for CSRF storage (Cleaner for React apps)
 CSRF_USE_SESSIONS = True
@@ -181,6 +188,9 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
@@ -212,10 +222,14 @@ OIDC_OP_JWKS_ENDPOINT = f"{AUTHENTIK_BASE_URL}/application/o/remlearner/jwks/"
 OIDC_RP_SIGN_ALGO = 'RS256'
 OIDC_STORE_ACCESS_TOKEN = True
 OIDC_STORE_ID_TOKEN = True
-OIDC_RP_CALLBACK_URL = 'http://localhost:8000/api/oidc/callback/'
+# Use dynamic URLs for deployment if vars are defined
+_FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173').rstrip('/')
+_BACKEND_URL = os.getenv('BACKEND_URL', 'http://localhost:8000').rstrip('/')
 
-LOGIN_REDIRECT_URL = "http://localhost:5173/"
-LOGOUT_REDIRECT_URL = "http://localhost:5173/login"
+OIDC_RP_CALLBACK_URL = f"{_BACKEND_URL}/api/oidc/callback/"
+
+LOGIN_REDIRECT_URL = f"{_FRONTEND_URL}/"
+LOGOUT_REDIRECT_URL = f"{_FRONTEND_URL}/login"
 LOGIN_URL = "/api/oidc/authenticate/"
 
 # Session/Cookie settings for local OIDC
