@@ -26,6 +26,7 @@ class Learner(models.Model):
     
     phone_number = models.CharField(max_length=20, blank=True, null=True)
     resume = models.FileField(upload_to='resumes/', null=True, blank=True)
+    is_admin = models.BooleanField(default=False)
     profile_completed = models.BooleanField(default=False)
 
     created_at = models.DateTimeField(auto_now_add=True)

@@ -18,12 +18,24 @@ class AuthentikOIDCBackend(OIDCAuthenticationBackend):
         print(claims)
         print("---------------------------")
         
+        # Update or Create Learner Profile
+        learner, created = Learner.objects.get_or_create(
+            email=user.email,
+            defaults={
+                'auth_user_id': str(claims.get('sub')),
+                'full_name': f"{user.first_name} {user.last_name}".strip() or user.email,
+            }
+        )
+
         groups = claims.get('groups', [])
         
-        # Admin logic: Check if user is in 'Admins' group in Authentik
-        if 'Admins' in groups:
+        # Admin logic: Check if user is in 'Admins' group in Authentik OR is marked admin in DB
+        if 'Admins' in groups or learner.is_admin:
             user.is_staff = True
             user.is_superuser = True
+            if not learner.is_admin:
+                learner.is_admin = True
+                learner.save()
         else:
             user.is_staff = False
             user.is_superuser = False
@@ -32,11 +44,7 @@ class AuthentikOIDCBackend(OIDCAuthenticationBackend):
         user.last_name = claims.get('family_name', '')
         user.save()
 
-        # Update or Create Learner Profile
-        learner, created = Learner.objects.update_or_create(
-            email=user.email,
-            defaults={
-                'auth_user_id': claims.get('sub'),
-                'full_name': f"{user.first_name} {user.last_name}".strip() or user.email,
-            }
-        )
+        # Final sync of Learner profile
+        learner.auth_user_id = str(claims.get('sub'))
+        learner.full_name = f"{user.first_name} {user.last_name}".strip() or user.email
+        learner.save()

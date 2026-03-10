@@ -2,12 +2,13 @@ from django.contrib import admin
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
-from apps.accounts.views import LearnerViewSet
+from apps.accounts.views import LearnerViewSet, AuthViewSet
 from apps.curriculum.views import TrackViewSet, ModuleViewSet, LessonViewSet, AssessmentViewSet
 from apps.readiness.views import ReadinessSnapshotViewSet
 
 router = DefaultRouter()
 router.register(r'learners', LearnerViewSet)
+router.register(r'auth', AuthViewSet, basename='auth')
 router.register(r'tracks', TrackViewSet, basename='track')
 router.register(r'modules', ModuleViewSet)
 router.register(r'lessons', LessonViewSet)

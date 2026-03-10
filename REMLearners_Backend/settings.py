@@ -208,6 +208,7 @@ AUTHENTICATION_BACKENDS = (
 # OIDC Settings
 OIDC_RP_CLIENT_ID = os.getenv('AUTHENTIK_CLIENT_ID')
 OIDC_RP_CLIENT_SECRET = os.getenv('AUTHENTIK_CLIENT_SECRET')
+AUTHENTIK_API_TOKEN = os.getenv('AUTHENTIK_API_TOKEN')
 
 # Crucial: Ask Authentik for group memberships
 OIDC_RP_SCOPES = "openid email profile groups"
