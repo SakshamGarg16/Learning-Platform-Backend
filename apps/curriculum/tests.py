@@ -68,8 +68,8 @@ class CurriculumTests(TestCase):
 class AssessmentTests(TestCase):
     def setUp(self):
         self.client = Client()
-        self.user = User.objects.create_user(username="student@test.com", email="student@test.com")
-        self.learner = Learner.objects.create(email="student@test.com", full_name="Student", auth_user_id="student_ak")
+        self.user = User.objects.create_user(username="student_curric@test.com", email="student_curric@test.com")
+        self.learner = Learner.objects.create(email="student_curric@test.com", full_name="Student", auth_user_id="student_curric_ak")
         
         self.track = Track.objects.create(title="Test Track")
         self.module = Module.objects.create(track=self.track, title="Module 1", order=0)
@@ -126,3 +126,168 @@ class AssessmentTests(TestCase):
         remedial = Module.objects.get(is_remedial=True)
         self.assertEqual(remedial.title, "Remedial Basics")
         self.assertEqual(remedial.order, self.module.order + 1)
+
+    def test_submit_multi_select(self):
+        self.client.force_login(self.user)
+        # Add a multi-select question
+        self.assessment.questions_data = [
+            {
+                "question": "Select A and B",
+                "options": ["A", "B", "C"],
+                "correct_answer": [0, 1],
+                "type": "multi_select"
+            }
+        ]
+        self.assessment.save()
+        
+        # Perfect match
+        data = {"answers": {"0": [0, 1]}}
+        response = self.client.post(self.submit_url, data=json.dumps(data), content_type='application/json')
+        self.assertEqual(response.json()['score'], 100.0)
+        
+        # Reset and partial/wrong match
+        AssessmentAttempt.objects.all().delete()
+        data = {"answers": {"0": [0, 2]}}
+        response = self.client.post(self.submit_url, data=json.dumps(data), content_type='application/json')
+        # DRF error if not found? No, our logic handles it.
+        self.assertEqual(response.json()['score'], 0.0)
+
+class TrackAdminTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.admin = User.objects.create_user(username="admin@tracks.com", email="admin@tracks.com", is_staff=True)
+        self.track = Track.objects.create(title="Management Track")
+        self.user = User.objects.create_user(username="student@tracks.com", email="student@tracks.com")
+        self.learner = Learner.objects.create(email="student@tracks.com", full_name="Student", auth_user_id="s1")
+        TrackEnrollment.objects.create(learner=self.learner, track=self.track)
+        
+    def test_enrolled_candidates_list(self):
+        self.client.force_login(self.admin)
+        url = f'/api/tracks/{self.track.id}/enrolled_candidates/'
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json()), 1)
+        self.assertEqual(response.json()[0]['email'], "student@tracks.com")
+
+    def test_candidate_dossier(self):
+        self.client.force_login(self.admin)
+        url = f'/api/tracks/{self.track.id}/candidate_dossier/{self.learner.id}/'
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['learner']['email'], "student@tracks.com")
+
+class LessonTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create_user(username="lesson@test.com", email="lesson@test.com")
+        self.track = Track.objects.create(title="Track 1")
+        self.module = Module.objects.create(track=self.track, title="M1")
+        self.lesson = Lesson.objects.create(module=self.module, title="L1")
+        self.gen_url = f'/api/lessons/{self.lesson.id}/generate_content/'
+
+    @patch('apps.curriculum.views.generate_lesson_content')
+    def test_generate_lesson_content(self, mock_gen):
+        self.client.force_login(self.user)
+        mock_gen.return_value = "AI generated content"
+        
+        response = self.client.post(self.gen_url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['content'], "AI generated content")
+
+class CurriculumEdgeCaseTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create_user(username="edge@curric.com", email="edge@curric.com")
+        self.learner = Learner.objects.create(email="edge@curric.com", full_name="Edge", auth_user_id="e1")
+        self.admin = User.objects.create_user(username="staff@curric.com", email="staff@curric.com", is_staff=True)
+
+    def test_track_creation_anonymous(self):
+        # Should use operator fallback
+        data = {"title": "Anon Track", "description": "Anon Desc"}
+        response = self.client.post('/api/tracks/', data=json.dumps(data), content_type='application/json')
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(Track.objects.get(title="Anon Track").created_by.email, "operator@example.com")
+
+    def test_dossier_not_enrolled(self):
+        self.client.force_login(self.admin)
+        track = Track.objects.create(title="T")
+        other_learner = Learner.objects.create(email="other@test.com", full_name="Other", auth_user_id="o1")
+        url = f'/api/tracks/{track.id}/candidate_dossier/{other_learner.id}/'
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 404)
+
+    def test_submit_attempt_repeat_error(self):
+        self.client.force_login(self.user)
+        mod = Module.objects.create(track=Track.objects.create(title="T"), title="M")
+        ass = Assessment.objects.create(module=mod, title="A", questions_data=[{"question": "Q", "options": ["A"], "correct_index": 0}])
+        
+        # First attempt
+        AssessmentAttempt.objects.create(learner=self.learner, assessment=ass, score=100, passed=True)
+        
+        # Second attempt should fail
+        url = f'/api/assessments/{ass.id}/submit_attempt/'
+        response = self.client.post(url, data=json.dumps({"answers": {"0": 0}}), content_type='application/json')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("already been completed", response.json()['error'])
+
+    @patch('apps.curriculum.views.generate_assessment')
+    def test_generate_assessment_questions(self, mock_gen):
+        self.client.force_login(self.admin)
+        mod = Module.objects.create(track=Track.objects.create(title="T"), title="M")
+        ass = Assessment.objects.create(module=mod, title="A")
+        mock_gen.return_value = [{"question": "Q?"}]
+        
+        url = f'/api/assessments/{ass.id}/generate_questions/'
+        response = self.client.post(url)
+        self.assertEqual(response.status_code, 200)
+        ass.refresh_from_db()
+        self.assertEqual(len(ass.questions_data), 1)
+
+class CurriculumDeepTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.user1 = User.objects.create_user(username="u1@test.com", email="u1@test.com")
+        self.l1 = Learner.objects.create(email="u1@test.com", full_name="L1", auth_user_id="l1_ak")
+        
+        self.user2 = User.objects.create_user(username="u2@test.com", email="u2@test.com")
+        self.l2 = Learner.objects.create(email="u2@test.com", full_name="L2", auth_user_id="l2_ak")
+        
+        self.track = Track.objects.create(title="T1", created_by=self.l1)
+
+    def test_track_queryset_visibility(self):
+        # User 1 is creator, can see it
+        self.client.force_login(self.user1)
+        response = self.client.get('/api/tracks/')
+        self.assertEqual(len(response.json()), 1)
+        
+        # User 2 is neither creator nor enrolled, should NOT see it (filtered queryset)
+        self.client.force_login(self.user2)
+        response = self.client.get('/api/tracks/')
+        self.assertEqual(len(response.json()), 0)
+
+    @patch('apps.ai_generation.services.analyze_resume_for_curriculum')
+    def test_enroll_with_resume(self, mock_analyze):
+        self.client.force_login(self.user2)
+        # Give learner a resume
+        self.l2.resume = "fake.pdf"
+        self.l2.save()
+        
+        mock_analyze.return_value = "Optimized for L2"
+        
+        url = f'/api/tracks/{self.track.id}/enroll/'
+        response = self.client.post(url)
+        self.assertEqual(response.status_code, 200)
+        
+        enrollment = TrackEnrollment.objects.get(learner=self.l2, track=self.track)
+        self.assertEqual(enrollment.personalized_summary, "Optimized for L2")
+
+    @patch('apps.curriculum.views.generate_lesson_content')
+    def test_lesson_generate_content_anonymous(self, mock_gen):
+        mock_gen.return_value = "Public info"
+        lesson = Lesson.objects.create(module=Module.objects.create(track=self.track, title="M"), title="L")
+        url = f'/api/lessons/{lesson.id}/generate_content/'
+        
+        response = self.client.post(url)
+        self.assertEqual(response.status_code, 200)
+        lesson.refresh_from_db()
+        self.assertEqual(lesson.content, "Public info")

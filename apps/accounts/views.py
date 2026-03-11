@@ -38,6 +38,9 @@ class LearnerViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'], parser_classes=[MultiPartParser, FormParser, JSONParser])
     def complete_profile(self, request):
+        if not request.user.is_authenticated:
+            return Response({"error": "Authentication required"}, status=status.HTTP_401_UNAUTHORIZED)
+            
         learner = Learner.objects.filter(email=request.user.email).first()
         if not learner:
             return Response({"error": "Learner not found"}, status=status.HTTP_404_NOT_FOUND)
@@ -89,7 +92,7 @@ class AuthViewSet(viewsets.ViewSet):
             user_data_resp = requests.get(user_api_url, headers=headers)
             
             if user_data_resp.status_code != 200 or not user_data_resp.json().get('results'):
-                return Response({"error": "Authenticated but failed to fetch user details"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                return Response({"error": "Incorrect Password or Username! Please try again."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
             
             ak_user = user_data_resp.json()['results'][0]
             

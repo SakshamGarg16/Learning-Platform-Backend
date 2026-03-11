@@ -4,3 +4,7 @@ __pycache__/
 .vscode/
 .idea/
 media/
+
+# Test coverage
+.coverage
+htmlcov/
