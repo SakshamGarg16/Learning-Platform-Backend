@@ -22,7 +22,11 @@ class ReadinessSnapshotViewSet(viewsets.ModelViewSet):
         from apps.accounts.models import Learner
         if request.user.is_authenticated:
             return Learner.objects.filter(email=request.user.email).first()
-        return Learner.objects.filter(email="operator@example.com").first()
+        learner, _ = Learner.objects.get_or_create(
+            email="operator@example.com",
+            defaults={"full_name": "MVP Operator", "auth_user_id": "mvp_operator"}
+        )
+        return learner
 
     def list(self, request, *args, **kwargs):
         learner = self.get_learner(request)

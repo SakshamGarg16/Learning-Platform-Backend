@@ -230,12 +230,12 @@ class CurriculumEdgeCaseTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("already been completed", response.json()['error'])
 
-    @patch('apps.curriculum.views.generate_assessment')
-    def test_generate_assessment_questions(self, mock_gen):
+    @patch('apps.ai_generation.langgraph_workflows.assessment_generator_app.invoke')
+    def test_generate_assessment_questions(self, mock_invoke):
         self.client.force_login(self.admin)
         mod = Module.objects.create(track=Track.objects.create(title="T"), title="M")
         ass = Assessment.objects.create(module=mod, title="A")
-        mock_gen.return_value = [{"question": "Q?"}]
+        mock_invoke.return_value = {"assessment_questions": [{"question": "Q?"}]}
         
         url = f'/api/assessments/{ass.id}/generate_questions/'
         response = self.client.post(url)

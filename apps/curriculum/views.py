@@ -4,7 +4,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from .models import Track, Module, Lesson, Assessment, AssessmentAttempt
 from .serializers import TrackSerializer, ModuleSerializer, LessonSerializer, AssessmentSerializer, AssessmentAttemptSerializer
-from apps.ai_generation.services import generate_track_curriculum, generate_lesson_content, generate_assessment, analyze_assessment_failure
+from apps.ai_generation.services import generate_track_curriculum, generate_lesson_content, analyze_assessment_failure
 import threading
 
 def background_generate_content(track_id, learner_id):
@@ -25,27 +25,36 @@ def background_generate_content(track_id, learner_id):
             
         summary = enrollment.personalized_summary
         
-        # Traverse all modules and lessons
+        # Traverse all modules
+        from apps.ai_generation.langgraph_workflows import module_generator_app
+        
         for module in track.modules.all():
+            lessons_to_generate = []
             for lesson in module.lessons.all():
                 # Check if already generated
-                if PersonalizedLessonContent.objects.filter(lesson=lesson, learner=learner).exists():
-                    continue
+                if not PersonalizedLessonContent.objects.filter(lesson=lesson, learner=learner).exists():
+                    lessons_to_generate.append({"id": str(lesson.id), "title": lesson.title})
                     
-                print(f"Background generating: {lesson.title} for {learner.email}")
+            assessment = getattr(module, 'assessment', None)
+            needs_assessment = True if assessment and not assessment.questions_data else False
+            
+            if lessons_to_generate or needs_assessment:
+                print(f"Background generating (LangGraph) for module map: {module.title} / {learner.email}")
                 
-                content = generate_lesson_content(
-                    track_title=track.title,
-                    module_title=module.title,
-                    lesson_title=lesson.title,
-                    learner_summary=summary
-                )
+                initial_state = {
+                    "learner_id": str(learner.id),
+                    "track_id": str(track.id),
+                    "module_id": str(module.id),
+                    "track_title": track.title,
+                    "module_title": module.title,
+                    "learner_summary": summary,
+                    "needs_assessment": needs_assessment,
+                    "lessons_to_generate": lessons_to_generate,
+                    "generated_lessons": [],
+                    "assessment_questions": []
+                }
                 
-                PersonalizedLessonContent.objects.create(
-                    lesson=lesson,
-                    learner=learner,
-                    content=content
-                )
+                module_generator_app.invoke(initial_state)
     except Exception as e:
         print(f"Background generation error: {e}")
 
@@ -365,11 +374,15 @@ class AssessmentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def generate_questions(self, request, pk=None):
         assessment = self.get_object()
+        from apps.ai_generation.langgraph_workflows import assessment_generator_app
         
-        questions = generate_assessment(
-            module_title=assessment.module.title,
-            track_title=assessment.module.track.title
-        )
+        result = assessment_generator_app.invoke({
+            "track_title": assessment.module.track.title,
+            "module_title": assessment.module.title,
+            "assessment_questions": []
+        })
+        
+        questions = result.get("assessment_questions", [])
         
         assessment.questions_data = questions
         assessment.save()

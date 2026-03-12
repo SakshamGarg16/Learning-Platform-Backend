@@ -80,121 +80,29 @@ def generate_track_curriculum(topic: str, learner_summary: str = None) -> dict:
 
 def generate_lesson_content(track_title: str, module_title: str, lesson_title: str, learner_summary: str = None) -> str:
     """
-    Generates detailed, rigorous markdown content for a specific lesson.
-    If learner_summary is provided, it tailors the explanation to the user's specific background.
+    Generates detailed, rigorous markdown content for a specific lesson using LangGraph.
+    It breaks the lesson into subtopics and concurrently generates content for each subtopic.
     """
     if not client:
         return "AI Client not configured."
         
-    personalization_prompt = ""
-    if learner_summary:
-        personalization_prompt = f"""
-        ### USER PERSONALIZATION CONTEXT (CRITICAL):
-        The following is a summary of the learner's existing background relative to this track:
-        \"\"\"{learner_summary}\"\"\"
-        
-        Use this context to make the lesson more relatable and effective:
-        1. **Analogies**: Where possible, compare new concepts to technologies or concepts the user already knows (as identified in the summary).
-        2. **Efficiency**: If the user is an expert in a related field, skip the basics and focus on the deltas and specific implementation details of this track.
-        3. **Tone**: Use an 'expert-to-expert' tone if the summary indicates high seniority.
-        """
+    from .langgraph_workflows import lesson_generator_app
 
-    prompt = f"""
-    You are an expert instructor.
-    Track: {track_title}
-    Module: {module_title}
-    Lesson: {lesson_title}
-    
-    {personalization_prompt}
-    
-    Provide a detailed, rigorous, and highly educational explanation for this lesson.
-    
-    ### Visual & Technical Guidelines:
-    1. **Formatting**: Strictly follow Markdown hierarchies.
-    2. **Code Block Protocol (CRITICAL)**: 
-       - **Triple Backticks (```)**: Use ONLY for multi-line, executable code blocks. They MUST have a language tag.
-       - **Single Backticks (`)**: Use for inline technical terms. Integrate them INTO existing sentences.
-       - **Unbroken Paragraphs**: NEVER break a sentence or start a new line just because it contains a backtick. Technical content must be a single, flowing paragraph.
-    3. **Markdown Tables (Mandatory for Comparisons)**:
-       - You MUST use the full `|` delimiter syntax.
-       - Example:
-         | Feature | Description |
-         | :--- | :--- |
-         | Item | Explanation |
-    4. **Code Quality**: Provide robust, multi-line code examples with helpful comments.
-    5. **Understanding (Crucial)**: 
-       - For every core technical concept, include a **Mermaid diagram**.
-       - **No Block Chatter**: The Mermaid block MUST start immediately with the graph type (e.g., `graph TD`). NO titles, NO comments, NO plain text inside the backticks.
-       - **Mermaid Golden Rule**: ALWAYS use explicit alphanumeric IDs and wrap labels in double quotes. 
-         FORMAT: `ID["Label Text"]` (e.g., `A["State Change"] --> B["Proxy Intercept"]`).
-       - **Nested Content (STRICT BAN)**: NEVER use quotes (`"` or `'`), backticks (`` ` ``), parentheses `()`, or brackets `[]` inside a Mermaid label. Use plain descriptive text ONLY.
-       - **Arrows**: Use standard lowercase arrows: `-->`, `---`, `-.-`, `==>`, `--x`, `--o`.
-       - **Complexity**: Keep diagrams focused (max 8 nodes).
-    6. **Tone**: Rigorous and professional.
-    7. **Images**: Can use relevent Images. The image should be complelety relevent to the chapter nd content.
-    """
-    
-    response = client.models.generate_content(
-        model=DEFAULT_MODEL,
-        contents=prompt,
-        config=genai.types.GenerateContentConfig(
-            temperature=0.4,
-        ),
-    )
-    
-    return response.text
-
-
-def generate_assessment(module_title: str, track_title: str) -> list:
-    """
-    Generates a dynamic quiz for the end of a module.
-    AI decides the number of questions (3-10) and the types (mcq, boolean, multi_select).
-    """
-    if not client:
-        return []
-        
-    prompt = f"""
-    You are an elite technical examiner. Create a rigorous, high-stakes assessment for:
-    Track: {track_title}
-    Module: {module_title}
-    
-    ### Dynamic Guidelines:
-    1. **Question Volume**: Do not stick to a fixed number. Decide the optimal volume (between 3 to 10 questions) based on the depth of the module.
-    2. **Heuristic Variety**: Integrate a mix of the following types:
-       - `mcq`: Standard multiple choice (exactly 1 correct).
-       - `boolean`: True/False style (2 options).
-       - `multi_select`: Technical scenarios where multiple options might be correct (>=1 correct).
-    
-    ### Strict JSON Schema:
-    Return a JSON array of objects:
-    [
-        {{
-            "question": "The question text",
-            "type": "mcq" | "boolean" | "multi_select",
-            "options": ["Option 1", "Option 2", ...],
-            "correct_answer": [0, 2], // List of indices of the correct options. Use a list even for mcq/boolean.
-            "explanation": "Detailed technical justification"
-        }}
-    ]
-    
-    Make the questions highly challenging and focused on real-world engineering constraints. 
-    Do not include markdown formatting blocks.
-    """
-    
-    response = client.models.generate_content(
-        model=DEFAULT_MODEL,
-        contents=prompt,
-        config=genai.types.GenerateContentConfig(
-            response_mime_type="application/json",
-            temperature=0.3,
-        ),
-    )
+    initial_state = {
+        "track_title": track_title,
+        "module_title": module_title,
+        "lesson_title": lesson_title,
+        "learner_summary": learner_summary or "",
+        "sublesson_contents": []
+    }
     
     try:
-        return json.loads(response.text)
+        result = lesson_generator_app.invoke(initial_state)
+        return result.get("final_content", "Failed to generate lesson content.")
     except Exception as e:
-        print(f"Error parsing dynamic assessment JSON: {e}")
-        return []
+        print(f"LangGraph execution error: {e}")
+        return "An error occurred while generating the detailed lesson content."
+
 
 
 def analyze_assessment_failure(module_title: str, questions_data: list, user_answers_data: dict) -> dict:
