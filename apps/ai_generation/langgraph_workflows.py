@@ -335,3 +335,96 @@ module_workflow.add_edge("generate_module_lesson_node", "store_module_results_no
 module_workflow.add_edge("store_module_results_node", END)
 
 module_generator_app = module_workflow.compile()
+
+
+# --- ROADMAP LEVEL WORKFLOW ---
+
+class RoadmapState(TypedDict):
+    goal: str
+    admin_id: str
+    roadmap_title: str
+    roadmap_description: str
+    steps: List[Dict[str, str]]
+    roadmap_id: str
+
+def generate_roadmap_structure(state: RoadmapState):
+    from .services import client, DEFAULT_MODEL
+    
+    prompt = f"""
+    You are an elite career coach and curriculum architect.
+    The user wants to become: "{state['goal']}".
+    
+    Design a comprehensive career roadmap. 
+    Break it down into 5-8 major steps.
+    Each step should represent a significant milestone/learning track.
+    
+    Return the result strictly as a JSON object:
+    {{
+        "title": "Roadmap Title",
+        "description": "Comprehensive description of the path",
+        "steps": [
+            {{
+                "title": "Step Title",
+                "description": "What this milestone covers and why it's important"
+            }}
+        ]
+    }}
+    
+    Do not include markdown formatting blocks.
+    """
+    
+    response = client.models.generate_content(
+        model=DEFAULT_MODEL,
+        contents=prompt,
+        config=genai.types.GenerateContentConfig(
+            response_mime_type="application/json",
+            temperature=0.3,
+        ),
+    )
+    
+    try:
+        data = json.loads(response.text)
+        return {
+            "roadmap_title": data.get("title", f"Roadmap for {state['goal']}"),
+            "roadmap_description": data.get("description", ""),
+            "steps": data.get("steps", [])
+        }
+    except Exception as e:
+        print(f"Error parsing roadmap JSON: {e}")
+        return {"steps": []}
+
+def store_generated_roadmap(state: RoadmapState):
+    from apps.curriculum.models import Roadmap, RoadmapStep
+    from apps.accounts.models import Learner
+    
+    try:
+        admin = Learner.objects.filter(id=state["admin_id"]).first()
+        
+        roadmap = Roadmap.objects.create(
+            title=state["roadmap_title"],
+            description=state["roadmap_description"],
+            created_by=admin
+        )
+        
+        for idx, step_data in enumerate(state["steps"]):
+            RoadmapStep.objects.create(
+                roadmap=roadmap,
+                title=step_data.get("title", f"Step {idx+1}"),
+                description=step_data.get("description", ""),
+                order=idx
+            )
+            
+        return {"roadmap_id": str(roadmap.id)}
+    except Exception as e:
+        print(f"Error storing roadmap: {e}")
+        return {}
+
+roadmap_workflow = StateGraph(RoadmapState)
+roadmap_workflow.add_node("generate_roadmap_structure", generate_roadmap_structure)
+roadmap_workflow.add_node("store_generated_roadmap", store_generated_roadmap)
+
+roadmap_workflow.add_edge(START, "generate_roadmap_structure")
+roadmap_workflow.add_edge("generate_roadmap_structure", "store_generated_roadmap")
+roadmap_workflow.add_edge("store_generated_roadmap", END)
+
+roadmap_generator_app = roadmap_workflow.compile()

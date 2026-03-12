@@ -118,3 +118,51 @@ class PersonalizedLessonContent(models.Model):
 
     def __str__(self):
         return f"Personalized: {self.learner.email} - {self.lesson.title}"
+
+
+class Roadmap(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    title = models.CharField(max_length=255)
+    description = models.TextField()
+    
+    created_by = models.ForeignKey(Learner, on_delete=models.SET_NULL, null=True, blank=True, related_name='created_roadmaps')
+    is_finalized = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.title
+
+
+class RoadmapStep(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    roadmap = models.ForeignKey(Roadmap, on_delete=models.CASCADE, related_name='steps')
+    title = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    order = models.IntegerField(default=0)
+    
+    # Each step maps to a Track once finalized/generated
+    track = models.ForeignKey(Track, on_delete=models.SET_NULL, null=True, blank=True, related_name='roadmap_steps')
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['order']
+
+    def __str__(self):
+        return f"{self.roadmap.title} - Step {self.order}: {self.title}"
+
+
+class RoadmapEnrollment(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    learner = models.ForeignKey(Learner, on_delete=models.CASCADE, related_name='roadmap_enrollments')
+    roadmap = models.ForeignKey(Roadmap, on_delete=models.CASCADE, related_name='enrollments')
+    
+    enrolled_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        unique_together = ('learner', 'roadmap')
+
+    def __str__(self):
+        return f"{self.learner.email} enrolled in {self.roadmap.title}"

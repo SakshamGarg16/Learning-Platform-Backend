@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Track, Module, Lesson, Assessment, AssessmentAttempt
+from .models import Track, Module, Lesson, Assessment, AssessmentAttempt, Roadmap, RoadmapStep, RoadmapEnrollment
 
 class LessonSerializer(serializers.ModelSerializer):
     content = serializers.SerializerMethodField()
@@ -80,6 +80,10 @@ class ModuleSerializer(serializers.ModelSerializer):
             # Fallback for MVP local environments
             learner = Learner.objects.filter(email="operator@example.com").first()
 
+        # 0. Admins have full access
+        if (learner and learner.is_admin) or (request and request.user.is_staff):
+            return True
+
         # 1. First module always unlocked for everyone
         if obj.order == 0:
             return True
@@ -147,8 +151,8 @@ class TrackSerializer(serializers.ModelSerializer):
         if not learner:
             return False
         
-        # If you are the creator, you never need to "enroll"
-        if obj.created_by == learner:
+        # If you are the creator or admin, you never need to "enroll"
+        if obj.created_by == learner or (request and request.user.is_staff):
             return True
             
         return TrackEnrollment.objects.filter(track=obj, learner=learner).exists()
@@ -178,4 +182,102 @@ class TrackSerializer(serializers.ModelSerializer):
         
         return round((completed_count / total_modules) * 100)
 
-        return round((completed_count / total_modules) * 100)
+
+class RoadmapStepSerializer(serializers.ModelSerializer):
+    track = TrackSerializer(read_only=True)
+    is_unlocked = serializers.SerializerMethodField()
+    is_completed = serializers.SerializerMethodField()
+
+    class Meta:
+        model = RoadmapStep
+        fields = ['id', 'title', 'description', 'order', 'track', 'is_unlocked', 'is_completed']
+
+    def get_is_unlocked(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return obj.order == 0
+        
+        from apps.accounts.models import Learner
+        learner = Learner.objects.filter(email=request.user.email).first()
+        if not learner:
+            learner = Learner.objects.filter(email="operator@example.com").first()
+            
+        if (learner and learner.is_admin) or (request and request.user.is_staff):
+            return True
+
+        if obj.order == 0:
+            return True
+        
+        # Unlocked if previous step track is completed
+        prev_step = RoadmapStep.objects.filter(roadmap=obj.roadmap, order=obj.order - 1).first()
+        if not prev_step:
+            return True
+        
+        if not prev_step.track:
+            return False
+            
+        # Check if learner completed all modules in the previous track
+        total_modules = prev_step.track.modules.count()
+        if total_modules == 0: return True
+        
+        completed_count = AssessmentAttempt.objects.filter(
+            learner=learner,
+            assessment__module__track=prev_step.track,
+            passed=True
+        ).values('assessment__module').distinct().count()
+        
+        return completed_count >= total_modules
+
+    def get_is_completed(self, obj):
+        if not obj.track: return False
+        request = self.context.get('request')
+        from apps.accounts.models import Learner
+        learner = None
+        if request and request.user.is_authenticated:
+            learner = Learner.objects.filter(email=request.user.email).first()
+        
+        if not learner:
+            learner = Learner.objects.filter(email="operator@example.com").first()
+        
+        if not learner: return False
+        
+        total_modules = obj.track.modules.count()
+        if total_modules == 0: return False
+        
+        completed_count = AssessmentAttempt.objects.filter(
+            learner=learner,
+            assessment__module__track=obj.track,
+            passed=True
+        ).values('assessment__module').distinct().count()
+        
+        return completed_count >= total_modules
+
+
+class RoadmapSerializer(serializers.ModelSerializer):
+    steps = RoadmapStepSerializer(many=True, read_only=True)
+    is_enrolled = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Roadmap
+        fields = ['id', 'title', 'description', 'created_at', 'steps', 'is_enrolled', 'is_finalized']
+
+    def get_is_enrolled(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return False
+            
+        from apps.accounts.models import Learner
+        from .models import RoadmapEnrollment
+        learner = Learner.objects.filter(email=request.user.email).first()
+        if not learner:
+            return False
+            
+        return RoadmapEnrollment.objects.filter(roadmap=obj, learner=learner).exists()
+
+
+class RoadmapEnrollmentSerializer(serializers.ModelSerializer):
+    roadmap = RoadmapSerializer(read_only=True)
+
+    class Meta:
+        model = RoadmapEnrollment
+        fields = ['id', 'roadmap', 'enrolled_at']

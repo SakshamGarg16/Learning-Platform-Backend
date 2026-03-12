@@ -2,8 +2,8 @@ from django.db import models
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from .models import Track, Module, Lesson, Assessment, AssessmentAttempt
-from .serializers import TrackSerializer, ModuleSerializer, LessonSerializer, AssessmentSerializer, AssessmentAttemptSerializer
+from .models import Track, Module, Lesson, Assessment, AssessmentAttempt, Roadmap, RoadmapStep, RoadmapEnrollment
+from .serializers import TrackSerializer, ModuleSerializer, LessonSerializer, AssessmentSerializer, AssessmentAttemptSerializer, RoadmapSerializer, RoadmapStepSerializer, RoadmapEnrollmentSerializer
 from apps.ai_generation.services import generate_track_curriculum, generate_lesson_content, analyze_assessment_failure
 import threading
 
@@ -58,6 +58,94 @@ def background_generate_content(track_id, learner_id):
     except Exception as e:
         print(f"Background generation error: {e}")
 
+def background_finalize_roadmap(roadmap_id, learner_id):
+    """
+    Background worker to generate all tracks/modules for a roadmap.
+    Also triggers personalization for any enrolled learners.
+    """
+    try:
+        from .models import Roadmap, RoadmapStep, Track, Module, Lesson, Assessment, TrackEnrollment
+        from apps.accounts.models import Learner
+        from apps.ai_generation.services import generate_track_curriculum, analyze_resume_for_background
+
+        roadmap = Roadmap.objects.get(id=roadmap_id)
+        creator = Learner.objects.get(id=learner_id)
+        
+        for step in roadmap.steps.filter(track__isnull=True).order_by('order'):
+            topic = step.title
+            print(f"Background Finalizing Step: {topic}")
+            
+            curriculum_data = generate_track_curriculum(topic, None)
+            if curriculum_data:
+                track = Track.objects.create(
+                    title=curriculum_data.get('title', topic),
+                    description=curriculum_data.get('description', step.description),
+                    is_ai_generated=True,
+                    original_topic=topic,
+                    created_by=creator
+                )
+                for m_idx, module_data in enumerate(curriculum_data.get('modules', [])):
+                    module = Module.objects.create(
+                        track=track,
+                        title=module_data.get('title', f"Module {m_idx+1}"),
+                        description=module_data.get('description', ""),
+                        order=m_idx
+                    )
+                    for l_idx, lesson_data in enumerate(module_data.get('lessons', [])):
+                        Lesson.objects.create(
+                            module=module,
+                            title=lesson_data.get('title', f"Lesson {l_idx+1}"),
+                            order=l_idx
+                        )
+                    Assessment.objects.create(module=module, title=f"Assessment: {module.title}")
+                
+                step.track = track
+                step.save()
+                
+                # Now trigger personalization for all people enrolled in this roadmap
+                for rd_enroll in roadmap.enrollments.all():
+                    # Create track enrollment if not exists
+                    learner = rd_enroll.learner
+                    learner_summary = None
+                    if learner.resume:
+                        try:
+                            # Try to get existing summary or analyze
+                            existing_enroll = TrackEnrollment.objects.filter(learner=learner).exclude(personalized_summary__isnull=True).first()
+                            if existing_enroll:
+                                learner_summary = existing_enroll.personalized_summary
+                            else:
+                                learner_summary = analyze_resume_for_background(learner.resume.path)
+                        except: pass
+
+                    TrackEnrollment.objects.get_or_create(
+                        learner=learner,
+                        track=track,
+                        defaults={'personalized_summary': learner_summary}
+                    )
+                    # Pre-generate content
+                    threading.Thread(
+                        target=background_generate_content, 
+                        args=(track.id, learner.id),
+                        daemon=True
+                    ).start()
+
+                # Also trigger for the creator (Admin review mode)
+                TrackEnrollment.objects.get_or_create(
+                    learner=creator,
+                    track=track,
+                    defaults={'personalized_summary': "Administrator review mode. Generate comprehensive technical content for the general audience."}
+                )
+                threading.Thread(
+                    target=background_generate_content, 
+                    args=(track.id, creator.id),
+                    daemon=True
+                ).start()
+                    
+                print(f"Finalized Step: {topic} -> Track: {track.id}")
+                
+    except Exception as e:
+        print(f"Error in background_finalize_roadmap: {e}")
+
 class ModuleViewSet(viewsets.ModelViewSet):
     queryset = Module.objects.all().prefetch_related('lessons', 'assessment')
     serializer_class = ModuleSerializer
@@ -69,10 +157,13 @@ class TrackViewSet(viewsets.ModelViewSet):
         if self.request.user.is_anonymous:
             return Track.objects.all().order_by('-created_at')
         
-        # Only show tracks where the user is either the creator OR an enrolled learner
+        from apps.accounts.models import Learner
+        learner = Learner.objects.filter(email=self.request.user.email).first()
+
+        # Tracks are private to their creator and enrolled learners.
         return Track.objects.filter(
-            models.Q(created_by__email=self.request.user.email) | 
-            models.Q(enrollments__learner__email=self.request.user.email)
+            models.Q(created_by=learner) | 
+            models.Q(enrollments__learner=learner)
         ).distinct().order_by('-created_at')
 
     def get_object(self):
@@ -493,3 +584,260 @@ class AssessmentViewSet(viewsets.ModelViewSet):
         
         serializer = AssessmentAttemptSerializer(attempt)
         return Response(serializer.data)
+
+
+class RoadmapViewSet(viewsets.ModelViewSet):
+    queryset = Roadmap.objects.all().prefetch_related('steps__track')
+    serializer_class = RoadmapSerializer
+
+    def get_queryset(self):
+        if self.request.user.is_anonymous:
+            return Roadmap.objects.none()
+        
+        from apps.accounts.models import Learner
+        learner = Learner.objects.filter(email=self.request.user.email).first()
+        if not learner:
+            return Roadmap.objects.none()
+
+        # Roadmaps are private to their creator and enrolled learners.
+        # Finalized roadmaps can still be opened via direct share-link retrieval below,
+        # but they should not appear in the general listing for unrelated users.
+        return Roadmap.objects.filter(
+            models.Q(created_by=learner) | 
+            models.Q(enrollments__learner=learner)
+        ).distinct().prefetch_related('steps__track')
+
+    def retrieve(self, request, *args, **kwargs):
+        # Allow viewing if it's finalized (public link case)
+        instance = self.get_queryset().filter(pk=kwargs.get('pk')).first()
+        if not instance:
+            # Fallback for public link access if not enrolled yet
+            instance = Roadmap.objects.filter(pk=kwargs.get('pk'), is_finalized=True).first()
+            
+        if not instance:
+            return Response({"error": "Roadmap not found or access restricted"}, status=status.HTTP_404_NOT_FOUND)
+            
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['post'])
+    def generate(self, request):
+        goal = request.data.get('goal')
+        if not goal:
+            return Response({"error": "Goal is required"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        from apps.accounts.models import Learner
+        from apps.ai_generation.langgraph_workflows import roadmap_generator_app
+        
+        learner = None
+        if not self.request.user.is_anonymous:
+            learner = Learner.objects.filter(email=self.request.user.email).first()
+        
+        if not learner:
+            learner, _ = Learner.objects.get_or_create(
+                email="operator@example.com",
+                defaults={"full_name": "MVP Operator", "auth_user_id": "mvp_operator"}
+            )
+
+        result = roadmap_generator_app.invoke({
+            "goal": goal,
+            "admin_id": str(learner.id),
+            "roadmap_title": "",
+            "roadmap_description": "",
+            "steps": [],
+            "roadmap_id": ""
+        })
+        
+        roadmap_id = result.get("roadmap_id")
+        if not roadmap_id:
+            return Response({"error": "Failed to generate roadmap"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+        roadmap = Roadmap.objects.get(id=roadmap_id)
+        roadmap.created_by = learner
+        roadmap.save()
+        
+        return Response(self.get_serializer(roadmap).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'])
+    def enroll(self, request, pk=None):
+        roadmap = self.get_object()
+        from apps.accounts.models import Learner
+        learner = Learner.objects.filter(email=request.user.email).first()
+        if not learner:
+            return Response({"error": "Profile not found"}, status=status.HTTP_404_NOT_FOUND)
+            
+        enrollment, created = RoadmapEnrollment.objects.get_or_create(
+            learner=learner,
+            roadmap=roadmap
+        )
+        
+        # Auto-enroll in all existing tracks and trigger background personalization
+        from .models import TrackEnrollment
+        from apps.ai_generation.services import analyze_resume_for_background
+
+        learner_summary = None
+        if learner.resume:
+            try:
+                learner_summary = analyze_resume_for_background(learner.resume.path)
+            except:
+                pass
+
+        for step in roadmap.steps.all():
+            if step.track:
+                t_enroll, _ = TrackEnrollment.objects.get_or_create(
+                    learner=learner,
+                    track=step.track,
+                    defaults={'personalized_summary': learner_summary}
+                )
+                # Trigger personalized content generation for this track
+                thread = threading.Thread(target=background_generate_content, args=(step.track.id, learner.id))
+                thread.start()
+            
+        return Response({"status": "enrolled", "created": created})
+
+    @action(detail=True, methods=['post'])
+    def finalize_step(self, request, pk=None):
+        roadmap = self.get_object()
+        step_id = request.data.get('step_id')
+        step = RoadmapStep.objects.get(id=step_id, roadmap=roadmap)
+        
+        if step.track:
+            return Response({"status": "already_finalized", "track_id": step.track.id})
+            
+        # Generate learning track for this step title/topic
+        topic = step.title
+        from apps.accounts.models import Learner
+        learner = roadmap.created_by or Learner.objects.filter(email="operator@example.com").first()
+
+        curriculum_data = generate_track_curriculum(topic, None) # No summary needed for template track
+        if not curriculum_data:
+            return Response({"error": "Failed to generate curriculum for step"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+        track = Track.objects.create(
+            title=curriculum_data.get('title', topic),
+            description=curriculum_data.get('description', step.description),
+            is_ai_generated=True,
+            original_topic=topic,
+            created_by=learner
+        )
+        
+        for m_idx, module_data in enumerate(curriculum_data.get('modules', [])):
+            module = Module.objects.create(
+                track=track,
+                title=module_data.get('title', f"Module {m_idx+1}"),
+                description=module_data.get('description', ""),
+                order=m_idx
+            )
+            for l_idx, lesson_data in enumerate(module_data.get('lessons', [])):
+                Lesson.objects.create(
+                    module=module,
+                    title=lesson_data.get('title', f"Lesson {l_idx+1}"),
+                    order=l_idx
+                )
+            Assessment.objects.create(module=module, title=f"Assessment: {module.title}")
+
+        step.track = track
+        step.save()
+        
+        return Response({"status": "finalized", "track_id": track.id})
+
+    @action(detail=True, methods=['post'])
+    def finalize_all(self, request, pk=None):
+        roadmap = self.get_object()
+        roadmap.is_finalized = True
+        roadmap.save()
+        
+        # Immediate response with a share URL
+        # We assume the frontend joins the base URL with the ID
+        share_url = f"/roadmaps/share/{roadmap.id}" 
+        
+        from apps.accounts.models import Learner
+        learner = roadmap.created_by or Learner.objects.filter(email=request.user.email).first() or Learner.objects.filter(email="operator@example.com").first()
+        
+        # Start background processing
+        thread = threading.Thread(target=background_finalize_roadmap, args=(roadmap.id, learner.id))
+        thread.start()
+        
+        return Response({
+            "status": "processing", 
+            "message": "Roadmap is being finalized in the background.",
+            "share_url": share_url
+        })
+
+    @action(detail=True, methods=['post'])
+    def reorder_steps(self, request, pk=None):
+        roadmap = self.get_object()
+        step_ids = request.data.get('step_ids', [])
+        for index, step_id in enumerate(step_ids):
+            RoadmapStep.objects.filter(id=step_id, roadmap=roadmap).update(order=index)
+        return Response({"status": "reordered"})
+
+    @action(detail=True, methods=['post'])
+    def add_step(self, request, pk=None):
+        roadmap = self.get_object()
+        title = request.data.get('title', 'New Milestone')
+        description = request.data.get('description', '')
+        
+        last_step = roadmap.steps.order_by('-order').first()
+        order = (last_step.order + 1) if last_step else 0
+        
+        step = RoadmapStep.objects.create(
+            roadmap=roadmap,
+            title=title,
+            description=description,
+            order=order
+        )
+        return Response(RoadmapStepSerializer(step).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'])
+    def delete_step(self, request, pk=None):
+        roadmap = self.get_object()
+        step_id = request.data.get('step_id')
+        step = RoadmapStep.objects.filter(id=step_id, roadmap=roadmap).first()
+        if step:
+            if step.track:
+                return Response({"error": "Cannot delete a step that has been finalized into a track"}, status=status.HTTP_400_BAD_REQUEST)
+            step.delete()
+            return Response({"status": "deleted"})
+        return Response({"error": "Step not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    @action(detail=True, methods=['post'])
+    def ai_add_step(self, request, pk=None):
+        roadmap = self.get_object()
+        instruction = request.data.get('instruction')
+        if not instruction:
+            return Response({"error": "Instruction is required"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        from apps.ai_generation.services import generate_custom_roadmap_step
+        roadmap_data = RoadmapSerializer(roadmap).data
+        
+        step_data = generate_custom_roadmap_step(instruction, roadmap_data)
+        if not step_data:
+            return Response({"error": "Failed to generate AI step"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+        last_step = roadmap.steps.order_by('-order').first()
+        order = (last_step.order + 1) if last_step else 0
+        
+        step = RoadmapStep.objects.create(
+            roadmap=roadmap,
+            title=step_data.get('title', 'AI Milestone'),
+            description=step_data.get('description', ''),
+            order=order
+        )
+        return Response(RoadmapStepSerializer(step).data, status=status.HTTP_201_CREATED)
+
+
+class RoadmapStepViewSet(viewsets.ModelViewSet):
+    queryset = RoadmapStep.objects.all()
+    serializer_class = RoadmapStepSerializer
+
+
+class RoadmapEnrollmentViewSet(viewsets.ReadOnlyModelViewSet):
+    serializer_class = RoadmapEnrollmentSerializer
+
+    def get_queryset(self):
+        from apps.accounts.models import Learner
+        learner = Learner.objects.filter(email=self.request.user.email).first()
+        if not learner:
+            return RoadmapEnrollment.objects.none()
+        return RoadmapEnrollment.objects.filter(learner=learner)

@@ -237,3 +237,47 @@ def analyze_resume_for_curriculum(resume_path: str, curriculum_overview: str) ->
     DEPRECATED: Use the more general analyze_resume_for_background instead.
     """
     return analyze_resume_for_background(resume_path)
+
+
+def generate_custom_roadmap_step(instruction: str, current_roadmap: dict) -> dict:
+    """
+    Generates a new roadmap step based on a natural language instruction and the current roadmap context.
+    """
+    if not client:
+        return {}
+    
+    prompt = f"""
+    You are an elite curriculum architect.
+    Current Roadmap: "{current_roadmap.get('title')}"
+    Description: {current_roadmap.get('description')}
+    
+    Existing Milestones:
+    {json.dumps([s.get('title') for s in current_roadmap.get('steps', [])], indent=2)}
+    
+    USER REQUEST: "{instruction}"
+    
+    Based on this request, generate a NEW milestone step that fits this roadmap.
+    It should be precise, technical, and high-impact.
+    
+    Return strictly as a JSON object:
+    {{
+        "title": "Step Title",
+        "description": "Step Description"
+    }}
+    
+    Do not include markdown blocks.
+    """
+    
+    try:
+        response = client.models.generate_content(
+            model=DEFAULT_MODEL,
+            contents=prompt,
+            config=genai.types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.4,
+            ),
+        )
+        return json.loads(response.text)
+    except Exception as e:
+        print(f"Error generating custom step: {e}")
+        return {}

@@ -3,7 +3,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
 from apps.accounts.views import LearnerViewSet, AuthViewSet
-from apps.curriculum.views import TrackViewSet, ModuleViewSet, LessonViewSet, AssessmentViewSet
+from apps.curriculum.views import TrackViewSet, ModuleViewSet, LessonViewSet, AssessmentViewSet, RoadmapViewSet, RoadmapStepViewSet, RoadmapEnrollmentViewSet
 from apps.readiness.views import ReadinessSnapshotViewSet
 
 router = DefaultRouter()
@@ -14,6 +14,9 @@ router.register(r'modules', ModuleViewSet)
 router.register(r'lessons', LessonViewSet)
 router.register(r'assessments', AssessmentViewSet)
 router.register(r'readiness', ReadinessSnapshotViewSet)
+router.register(r'roadmaps', RoadmapViewSet)
+router.register(r'roadmap-steps', RoadmapStepViewSet)
+router.register(r'roadmap-enrollments', RoadmapEnrollmentViewSet, basename='roadmap-enrollment')
 
 
 urlpatterns = [
