@@ -6,13 +6,24 @@ from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from .models import Learner
-from .serializers import LearnerSerializer, LoginSerializer, SignupSerializer
+from .serializers import (
+    LearnerSerializer,
+    LoginSerializer,
+    SignupSerializer,
+    LearnerDirectorySerializer,
+    LearnerPlatformDetailSerializer,
+)
 
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+
+SUPER_ADMIN_EMAIL = "admin@remlearner.com"
 
 class LearnerViewSet(viewsets.ModelViewSet):
     queryset = Learner.objects.all()
     serializer_class = LearnerSerializer
+
+    def _is_platform_owner(self, request):
+        return bool(request.user.is_authenticated and request.user.email == SUPER_ADMIN_EMAIL)
 
     @action(detail=False, methods=['get'])
     def me(self, request):
@@ -50,6 +61,27 @@ class LearnerViewSet(viewsets.ModelViewSet):
             serializer.save(profile_completed=True)
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['get'])
+    def platform_directory(self, request):
+        if not self._is_platform_owner(request):
+            return Response({"error": "Unauthorized"}, status=status.HTTP_403_FORBIDDEN)
+
+        learners = Learner.objects.all().order_by('-is_admin', 'full_name', 'email')
+        serializer = LearnerDirectorySerializer(learners, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'])
+    def platform_profile(self, request, pk=None):
+        if not self._is_platform_owner(request):
+            return Response({"error": "Unauthorized"}, status=status.HTTP_403_FORBIDDEN)
+
+        learner = Learner.objects.prefetch_related('created_tracks__enrollments', 'created_roadmaps__enrollments', 'created_roadmaps__steps').filter(pk=pk).first()
+        if not learner:
+            return Response({"error": "Learner not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = LearnerPlatformDetailSerializer(learner)
+        return Response(serializer.data)
 
 class AuthViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['post'], permission_classes=[permissions.AllowAny])

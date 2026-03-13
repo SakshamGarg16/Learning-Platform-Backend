@@ -1,5 +1,7 @@
 from rest_framework import serializers
-from .models import Track, Module, Lesson, Assessment, AssessmentAttempt, Roadmap, RoadmapStep, RoadmapEnrollment
+from .models import Track, TrackEnrollment, Module, Lesson, Assessment, AssessmentAttempt, Roadmap, RoadmapStep, RoadmapEnrollment
+
+SUPER_ADMIN_EMAIL = "admin@remlearner.com"
 
 class LessonSerializer(serializers.ModelSerializer):
     content = serializers.SerializerMethodField()
@@ -129,16 +131,38 @@ class TrackSerializer(serializers.ModelSerializer):
     progress_percentage = serializers.SerializerMethodField()
     is_enrolled = serializers.SerializerMethodField()
     is_creator = serializers.SerializerMethodField()
+    created_by_info = serializers.SerializerMethodField()
+    enrollment_count = serializers.SerializerMethodField()
+    is_global_suggestion = serializers.SerializerMethodField()
 
     class Meta:
         model = Track
-        fields = ['id', 'title', 'description', 'is_ai_generated', 'original_topic', 'created_at', 'modules', 'progress_percentage', 'is_enrolled', 'is_creator']
+        fields = [
+            'id', 'title', 'description', 'is_ai_generated', 'original_topic', 'created_at',
+            'modules', 'progress_percentage', 'is_enrolled', 'is_creator',
+            'created_by_info', 'enrollment_count', 'is_global_suggestion'
+        ]
 
     def get_is_creator(self, obj):
         request = self.context.get('request')
         if not request or not request.user.is_authenticated:
             return False
         return obj.created_by and obj.created_by.email == request.user.email
+
+    def get_created_by_info(self, obj):
+        if not obj.created_by:
+            return None
+        return {
+            "id": str(obj.created_by.id),
+            "name": obj.created_by.full_name,
+            "email": obj.created_by.email,
+        }
+
+    def get_enrollment_count(self, obj):
+        return TrackEnrollment.objects.filter(track=obj).count()
+
+    def get_is_global_suggestion(self, obj):
+        return bool(obj.created_by and obj.created_by.email == SUPER_ADMIN_EMAIL)
 
     def get_is_enrolled(self, obj):
         request = self.context.get('request')
@@ -256,10 +280,16 @@ class RoadmapStepSerializer(serializers.ModelSerializer):
 class RoadmapSerializer(serializers.ModelSerializer):
     steps = RoadmapStepSerializer(many=True, read_only=True)
     is_enrolled = serializers.SerializerMethodField()
+    created_by_info = serializers.SerializerMethodField()
+    enrollment_count = serializers.SerializerMethodField()
+    is_global_suggestion = serializers.SerializerMethodField()
 
     class Meta:
         model = Roadmap
-        fields = ['id', 'title', 'description', 'created_at', 'steps', 'is_enrolled', 'is_finalized']
+        fields = [
+            'id', 'title', 'description', 'created_at', 'steps', 'is_enrolled', 'is_finalized',
+            'created_by_info', 'enrollment_count', 'is_global_suggestion'
+        ]
 
     def get_is_enrolled(self, obj):
         request = self.context.get('request')
@@ -273,6 +303,21 @@ class RoadmapSerializer(serializers.ModelSerializer):
             return False
             
         return RoadmapEnrollment.objects.filter(roadmap=obj, learner=learner).exists()
+
+    def get_created_by_info(self, obj):
+        if not obj.created_by:
+            return None
+        return {
+            "id": str(obj.created_by.id),
+            "name": obj.created_by.full_name,
+            "email": obj.created_by.email,
+        }
+
+    def get_enrollment_count(self, obj):
+        return RoadmapEnrollment.objects.filter(roadmap=obj).count()
+
+    def get_is_global_suggestion(self, obj):
+        return bool(obj.created_by and obj.created_by.email == SUPER_ADMIN_EMAIL)
 
 
 class RoadmapEnrollmentSerializer(serializers.ModelSerializer):

@@ -1,4 +1,5 @@
 from django.db import models
+from django.shortcuts import get_object_or_404
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -6,6 +7,8 @@ from .models import Track, Module, Lesson, Assessment, AssessmentAttempt, Roadma
 from .serializers import TrackSerializer, ModuleSerializer, LessonSerializer, AssessmentSerializer, AssessmentAttemptSerializer, RoadmapSerializer, RoadmapStepSerializer, RoadmapEnrollmentSerializer
 from apps.ai_generation.services import generate_track_curriculum, generate_lesson_content, analyze_assessment_failure
 import threading
+
+SUPER_ADMIN_EMAIL = "admin@remlearner.com"
 
 def background_generate_content(track_id, learner_id):
     """
@@ -160,10 +163,14 @@ class TrackViewSet(viewsets.ModelViewSet):
         from apps.accounts.models import Learner
         learner = Learner.objects.filter(email=self.request.user.email).first()
 
+        if self.request.user.email == SUPER_ADMIN_EMAIL:
+            return Track.objects.all().order_by('-created_at')
+
         # Tracks are private to their creator and enrolled learners.
         return Track.objects.filter(
             models.Q(created_by=learner) | 
-            models.Q(enrollments__learner=learner)
+            models.Q(enrollments__learner=learner) |
+            models.Q(created_by__email=SUPER_ADMIN_EMAIL)
         ).distinct().order_by('-created_at')
 
     def get_object(self):
@@ -599,23 +606,34 @@ class RoadmapViewSet(viewsets.ModelViewSet):
         if not learner:
             return Roadmap.objects.none()
 
+        if self.request.user.email == SUPER_ADMIN_EMAIL:
+            return Roadmap.objects.all().prefetch_related('steps__track')
+
         # Roadmaps are private to their creator and enrolled learners.
         # Finalized roadmaps can still be opened via direct share-link retrieval below,
         # but they should not appear in the general listing for unrelated users.
         return Roadmap.objects.filter(
             models.Q(created_by=learner) | 
-            models.Q(enrollments__learner=learner)
+            models.Q(enrollments__learner=learner) |
+            models.Q(created_by__email=SUPER_ADMIN_EMAIL)
         ).distinct().prefetch_related('steps__track')
 
+    def get_object(self):
+        # Override to allow retrieving a specific roadmap even if not in the default queryset 
+        # (critical for the enrollment landing page and public links)
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+        filter_kwargs = {self.lookup_field: self.kwargs[lookup_url_kwarg]}
+        return get_object_or_404(Roadmap.objects.all(), **filter_kwargs)
+
     def retrieve(self, request, *args, **kwargs):
-        # Allow viewing if it's finalized (public link case)
-        instance = self.get_queryset().filter(pk=kwargs.get('pk')).first()
-        if not instance:
-            # Fallback for public link access if not enrolled yet
-            instance = Roadmap.objects.filter(pk=kwargs.get('pk'), is_finalized=True).first()
-            
-        if not instance:
-            return Response({"error": "Roadmap not found or access restricted"}, status=status.HTTP_404_NOT_FOUND)
+        instance = self.get_object()
+
+        # Allow viewing if it's finalized or the user is the creator/staff
+        if not instance.is_finalized:
+            from apps.accounts.models import Learner
+            learner = Learner.objects.filter(email=request.user.email).first()
+            if instance.created_by != learner and not request.user.is_staff:
+                 return Response({"error": "Roadmap not found or access restricted"}, status=status.HTTP_404_NOT_FOUND)
             
         serializer = self.get_serializer(instance)
         return Response(serializer.data)
@@ -661,6 +679,13 @@ class RoadmapViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def enroll(self, request, pk=None):
         roadmap = self.get_object()
+        
+        # Check permissions for non-public roadmaps (optional, but consistent)
+        if not roadmap.is_finalized and not request.user.is_staff:
+            from apps.accounts.models import Learner
+            learner = Learner.objects.filter(email=request.user.email).first()
+            if roadmap.created_by != learner:
+                return Response({"error": "Enrollment restricted"}, status=status.HTTP_403_FORBIDDEN)
         from apps.accounts.models import Learner
         learner = Learner.objects.filter(email=request.user.email).first()
         if not learner:
