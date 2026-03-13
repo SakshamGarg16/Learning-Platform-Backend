@@ -281,3 +281,70 @@ def generate_custom_roadmap_step(instruction: str, current_roadmap: dict) -> dic
     except Exception as e:
         print(f"Error generating custom step: {e}")
         return {}
+
+
+def generate_final_assessment_questions(scope_type: str, title: str, description: str, outline_items: list[str]) -> dict:
+    """
+    Generates a harder final evaluation for a full track or roadmap.
+    Returns a dict with questions and timing metadata.
+    """
+    if not client:
+        return {}
+
+    outline_text = "\n".join([f"- {item}" for item in outline_items]) or "- Comprehensive synthesis required"
+
+    prompt = f"""
+    You are an elite technical certification architect.
+
+    Build a final certification-grade assessment for this {scope_type}:
+    Title: {title}
+    Description: {description}
+
+    Coverage outline:
+    {outline_text}
+
+    Requirements:
+    1. This must be significantly harder than a module quiz.
+    2. Target real-world engineering judgment, system design tradeoffs, debugging, architecture, and applied reasoning.
+    3. Create between 10 and 16 questions.
+    4. Mix these question types:
+       - `mcq`
+       - `boolean`
+       - `multi_select`
+    5. At least half the questions should be scenario-based.
+    6. Use plausible distractors, not trivial wrong answers.
+    7. Default passing bar should be high.
+
+    Return strictly as JSON:
+    {{
+      "title": "Final Evaluation Title",
+      "description": "Short evaluation summary",
+      "passing_score": 85,
+      "time_limit_minutes": 60,
+      "questions": [
+        {{
+          "question": "Question text",
+          "type": "mcq",
+          "options": ["A", "B", "C", "D"],
+          "correct_answer": [1],
+          "explanation": "Why this is correct"
+        }}
+      ]
+    }}
+
+    Do not include markdown fences.
+    """
+
+    try:
+        response = client.models.generate_content(
+            model=DEFAULT_MODEL,
+            contents=prompt,
+            config=genai.types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.35,
+            ),
+        )
+        return json.loads(response.text)
+    except Exception as e:
+        print(f"Error generating final assessment JSON: {e}")
+        return {}

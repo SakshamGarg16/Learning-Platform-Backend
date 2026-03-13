@@ -4,7 +4,19 @@ from django.test import TestCase, Client
 from django.contrib.auth.models import User
 from rest_framework import status
 from apps.accounts.models import Learner
-from .models import Track, Module, Lesson, Assessment, AssessmentAttempt, TrackEnrollment, Roadmap, RoadmapStep, RoadmapEnrollment
+from .models import (
+    Track,
+    Module,
+    Lesson,
+    Assessment,
+    AssessmentAttempt,
+    TrackEnrollment,
+    Roadmap,
+    RoadmapStep,
+    RoadmapEnrollment,
+    Certificate,
+    FinalAssessmentAttempt,
+)
 
 class CurriculumTests(TestCase):
     def setUp(self):
@@ -234,6 +246,86 @@ class RoadmapAdminTests(TestCase):
         response = self.client.get(url)
 
         self.assertEqual(response.status_code, 403)
+
+
+class FinalAssessmentTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create_user(username="final@test.com", email="final@test.com")
+        self.learner = Learner.objects.create(email="final@test.com", full_name="Final User", auth_user_id="final_ak")
+
+        self.track = Track.objects.create(title="Platform Engineering", description="End to end")
+        self.module = Module.objects.create(track=self.track, title="Core Module", order=0)
+        self.assessment = Assessment.objects.create(
+            module=self.module,
+            questions_data=[{"question": "Q1", "options": ["A", "B"], "correct_answer": [0], "type": "mcq"}]
+        )
+        AssessmentAttempt.objects.create(
+            learner=self.learner,
+            assessment=self.assessment,
+            answers_data={"0": 0},
+            score=100,
+            passed=True
+        )
+
+        self.roadmap = Roadmap.objects.create(title="Engineering Roadmap", description="Roadmap")
+        self.step = RoadmapStep.objects.create(roadmap=self.roadmap, title="Step 1", order=0, track=self.track)
+
+    @patch('apps.curriculum.views.generate_final_assessment_questions')
+    def test_track_final_assessment_pass_issues_certificate(self, mock_generate):
+        self.client.force_login(self.user)
+        mock_generate.return_value = {
+            "title": "Track Final",
+            "description": "Hard mode",
+            "passing_score": 85,
+            "time_limit_minutes": 60,
+            "questions": [
+                {"question": "Hard Q1", "options": ["A", "B"], "correct_answer": [0], "type": "mcq"},
+                {"question": "Hard Q2", "options": ["A", "B"], "correct_answer": [1], "type": "mcq"},
+            ]
+        }
+
+        response = self.client.get(f'/api/tracks/{self.track.id}/final_assessment/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['available'], True)
+
+        submit_response = self.client.post(
+            f'/api/tracks/{self.track.id}/submit_final_assessment/',
+            data=json.dumps({"answers": {"0": 0, "1": 1}, "integrity_flags": {}}),
+            content_type='application/json'
+        )
+
+        self.assertEqual(submit_response.status_code, 200)
+        self.assertTrue(submit_response.json()['passed'])
+        self.assertEqual(Certificate.objects.count(), 1)
+        self.assertEqual(FinalAssessmentAttempt.objects.count(), 1)
+
+    @patch('apps.curriculum.views.generate_final_assessment_questions')
+    def test_roadmap_final_assessment_integrity_failure(self, mock_generate):
+        self.client.force_login(self.user)
+        mock_generate.return_value = {
+            "title": "Roadmap Final",
+            "description": "Hard mode",
+            "passing_score": 85,
+            "time_limit_minutes": 75,
+            "questions": [
+                {"question": "Hard Q1", "options": ["A", "B"], "correct_answer": [0], "type": "mcq"}
+            ]
+        }
+
+        response = self.client.get(f'/api/roadmaps/{self.roadmap.id}/final_assessment/')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['available'], True)
+
+        submit_response = self.client.post(
+            f'/api/roadmaps/{self.roadmap.id}/submit_final_assessment/',
+            data=json.dumps({"answers": {"0": 0}, "integrity_flags": {"tab_switch_count": 1}}),
+            content_type='application/json'
+        )
+
+        self.assertEqual(submit_response.status_code, 200)
+        self.assertFalse(submit_response.json()['passed'])
+        self.assertEqual(submit_response.json()['terminated_reason'], "Integrity violation detected during proctored final evaluation.")
 
 class LessonTests(TestCase):
     def setUp(self):

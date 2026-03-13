@@ -104,6 +104,55 @@ class AssessmentAttempt(models.Model):
         return f"{self.learner.email} - {self.assessment.title} - {self.score}"
 
 
+class FinalAssessment(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    track = models.OneToOneField('Track', on_delete=models.CASCADE, null=True, blank=True, related_name='final_assessment')
+    roadmap = models.OneToOneField('Roadmap', on_delete=models.CASCADE, null=True, blank=True, related_name='final_assessment')
+    title = models.CharField(max_length=255, default="Final Evaluation")
+    description = models.TextField(blank=True)
+    questions_data = models.JSONField(default=list, help_text="JSON array of advanced final evaluation questions")
+    passing_score = models.FloatField(default=80.0)
+    time_limit_minutes = models.PositiveIntegerField(default=45)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        target = self.track.title if self.track else self.roadmap.title if self.roadmap else "Unknown"
+        return f"Final Assessment: {target}"
+
+
+class FinalAssessmentAttempt(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    learner = models.ForeignKey(Learner, on_delete=models.CASCADE, related_name='final_assessment_attempts')
+    final_assessment = models.ForeignKey(FinalAssessment, on_delete=models.CASCADE, related_name='attempts')
+    answers_data = models.JSONField(default=dict)
+    integrity_flags = models.JSONField(default=dict, blank=True)
+    score = models.FloatField(null=True, blank=True)
+    passed = models.BooleanField(default=False)
+    terminated_reason = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('learner', 'final_assessment')
+
+    def __str__(self):
+        return f"{self.learner.email} - {self.final_assessment.title} - {self.score}"
+
+
+class Certificate(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    learner = models.ForeignKey(Learner, on_delete=models.CASCADE, related_name='certificates')
+    track = models.ForeignKey('Track', on_delete=models.CASCADE, null=True, blank=True, related_name='certificates')
+    roadmap = models.ForeignKey('Roadmap', on_delete=models.CASCADE, null=True, blank=True, related_name='certificates')
+    final_assessment_attempt = models.OneToOneField(FinalAssessmentAttempt, on_delete=models.CASCADE, related_name='certificate')
+    certificate_code = models.CharField(max_length=32, unique=True)
+    issued_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        target = self.track.title if self.track else self.roadmap.title if self.roadmap else "Unknown"
+        return f"Certificate {self.certificate_code} - {target}"
+
+
 class PersonalizedLessonContent(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     lesson = models.ForeignKey(Lesson, on_delete=models.CASCADE, related_name='personalized_contents')

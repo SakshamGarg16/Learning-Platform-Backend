@@ -1,5 +1,18 @@
 from rest_framework import serializers
-from .models import Track, TrackEnrollment, Module, Lesson, Assessment, AssessmentAttempt, Roadmap, RoadmapStep, RoadmapEnrollment
+from .models import (
+    Track,
+    TrackEnrollment,
+    Module,
+    Lesson,
+    Assessment,
+    AssessmentAttempt,
+    Roadmap,
+    RoadmapStep,
+    RoadmapEnrollment,
+    FinalAssessment,
+    FinalAssessmentAttempt,
+    Certificate,
+)
 
 SUPER_ADMIN_EMAIL = "admin@remlearner.com"
 
@@ -57,6 +70,67 @@ class AssessmentSerializer(serializers.ModelSerializer):
         if attempt:
             return AssessmentAttemptSerializer(attempt).data
         return None
+
+
+class CertificateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Certificate
+        fields = ['id', 'certificate_code', 'issued_at', 'track', 'roadmap']
+
+
+class FinalAssessmentAttemptSerializer(serializers.ModelSerializer):
+    certificate = CertificateSerializer(read_only=True)
+
+    class Meta:
+        model = FinalAssessmentAttempt
+        fields = [
+            'id', 'learner', 'final_assessment', 'answers_data', 'integrity_flags',
+            'score', 'passed', 'terminated_reason', 'certificate', 'created_at'
+        ]
+        read_only_fields = ['score', 'passed', 'terminated_reason', 'certificate', 'created_at']
+
+
+class FinalAssessmentSerializer(serializers.ModelSerializer):
+    user_latest_attempt = serializers.SerializerMethodField()
+
+    class Meta:
+        model = FinalAssessment
+        fields = [
+            'id', 'title', 'description', 'questions_data', 'passing_score',
+            'time_limit_minutes', 'user_latest_attempt'
+        ]
+
+    def get_user_latest_attempt(self, obj):
+        request = self.context.get('request')
+        if not request or request.user.is_anonymous:
+            return None
+
+        from apps.accounts.models import Learner
+        learner = Learner.objects.filter(email=request.user.email).first()
+        if not learner:
+            learner = Learner.objects.filter(email="operator@example.com").first()
+
+        if not learner:
+            return None
+
+        attempt = FinalAssessmentAttempt.objects.filter(
+            final_assessment=obj,
+            learner=learner
+        ).order_by('-created_at').first()
+        if attempt:
+            return FinalAssessmentAttemptSerializer(attempt).data
+        return None
+
+
+def _get_authenticated_learner(request):
+    if not request or request.user.is_anonymous:
+        return None
+
+    from apps.accounts.models import Learner
+    learner = Learner.objects.filter(email=request.user.email).first()
+    if learner:
+        return learner
+    return Learner.objects.filter(email="operator@example.com").first()
 
 
 class ModuleSerializer(serializers.ModelSerializer):
@@ -134,13 +208,14 @@ class TrackSerializer(serializers.ModelSerializer):
     created_by_info = serializers.SerializerMethodField()
     enrollment_count = serializers.SerializerMethodField()
     is_global_suggestion = serializers.SerializerMethodField()
+    final_assessment_status = serializers.SerializerMethodField()
 
     class Meta:
         model = Track
         fields = [
             'id', 'title', 'description', 'is_ai_generated', 'original_topic', 'created_at',
             'modules', 'progress_percentage', 'is_enrolled', 'is_creator',
-            'created_by_info', 'enrollment_count', 'is_global_suggestion'
+            'created_by_info', 'enrollment_count', 'is_global_suggestion', 'final_assessment_status'
         ]
 
     def get_is_creator(self, obj):
@@ -183,13 +258,7 @@ class TrackSerializer(serializers.ModelSerializer):
 
     def get_progress_percentage(self, obj):
         request = self.context.get('request')
-        from apps.accounts.models import Learner
-        learner = None
-        if request and request.user.is_authenticated:
-            learner = Learner.objects.filter(email=request.user.email).first()
-        
-        if not learner:
-            learner = Learner.objects.filter(email="operator@example.com").first()
+        learner = _get_authenticated_learner(request)
 
         if not learner:
             return 0
@@ -205,6 +274,39 @@ class TrackSerializer(serializers.ModelSerializer):
         ).values('assessment__module').distinct().count()
         
         return round((completed_count / total_modules) * 100)
+
+    def get_final_assessment_status(self, obj):
+        request = self.context.get('request')
+        learner = _get_authenticated_learner(request)
+        final_assessment = getattr(obj, 'final_assessment', None)
+        total_modules = obj.modules.count()
+        completed_modules = 0
+
+        if learner:
+            completed_modules = AssessmentAttempt.objects.filter(
+                learner=learner,
+                assessment__module__track=obj,
+                passed=True
+            ).values('assessment__module').distinct().count()
+
+        latest_attempt = None
+        certificate = None
+        if final_assessment and learner:
+            latest_attempt = FinalAssessmentAttempt.objects.filter(
+                final_assessment=final_assessment,
+                learner=learner
+            ).order_by('-created_at').first()
+            if latest_attempt and hasattr(latest_attempt, 'certificate'):
+                certificate = latest_attempt.certificate
+
+        return {
+            "available": total_modules > 0 and completed_modules >= total_modules,
+            "completed_modules": completed_modules,
+            "total_modules": total_modules,
+            "assessment": FinalAssessmentSerializer(final_assessment, context=self.context).data if final_assessment else None,
+            "passed": latest_attempt.passed if latest_attempt else False,
+            "certificate": CertificateSerializer(certificate).data if certificate else None,
+        }
 
 
 class RoadmapStepSerializer(serializers.ModelSerializer):
@@ -283,12 +385,13 @@ class RoadmapSerializer(serializers.ModelSerializer):
     created_by_info = serializers.SerializerMethodField()
     enrollment_count = serializers.SerializerMethodField()
     is_global_suggestion = serializers.SerializerMethodField()
+    final_assessment_status = serializers.SerializerMethodField()
 
     class Meta:
         model = Roadmap
         fields = [
             'id', 'title', 'description', 'created_at', 'steps', 'is_enrolled', 'is_finalized',
-            'created_by_info', 'enrollment_count', 'is_global_suggestion'
+            'created_by_info', 'enrollment_count', 'is_global_suggestion', 'final_assessment_status'
         ]
 
     def get_is_enrolled(self, obj):
@@ -318,6 +421,40 @@ class RoadmapSerializer(serializers.ModelSerializer):
 
     def get_is_global_suggestion(self, obj):
         return bool(obj.created_by and obj.created_by.email == SUPER_ADMIN_EMAIL)
+
+    def get_final_assessment_status(self, obj):
+        request = self.context.get('request')
+        learner = _get_authenticated_learner(request)
+        final_assessment = getattr(obj, 'final_assessment', None)
+        finalized_tracks = [step.track for step in obj.steps.all() if step.track]
+        total_modules = sum(track.modules.count() for track in finalized_tracks)
+        completed_modules = 0
+
+        if learner and finalized_tracks:
+            completed_modules = AssessmentAttempt.objects.filter(
+                learner=learner,
+                assessment__module__track__in=finalized_tracks,
+                passed=True
+            ).values('assessment__module').distinct().count()
+
+        latest_attempt = None
+        certificate = None
+        if final_assessment and learner:
+            latest_attempt = FinalAssessmentAttempt.objects.filter(
+                final_assessment=final_assessment,
+                learner=learner
+            ).order_by('-created_at').first()
+            if latest_attempt and hasattr(latest_attempt, 'certificate'):
+                certificate = latest_attempt.certificate
+
+        return {
+            "available": bool(finalized_tracks) and total_modules > 0 and completed_modules >= total_modules,
+            "completed_modules": completed_modules,
+            "total_modules": total_modules,
+            "assessment": FinalAssessmentSerializer(final_assessment, context=self.context).data if final_assessment else None,
+            "passed": latest_attempt.passed if latest_attempt else False,
+            "certificate": CertificateSerializer(certificate).data if certificate else None,
+        }
 
 
 class RoadmapEnrollmentSerializer(serializers.ModelSerializer):

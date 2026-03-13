@@ -3,10 +3,39 @@ from django.shortcuts import get_object_or_404
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from .models import Track, Module, Lesson, Assessment, AssessmentAttempt, Roadmap, RoadmapStep, RoadmapEnrollment
-from .serializers import TrackSerializer, ModuleSerializer, LessonSerializer, AssessmentSerializer, AssessmentAttemptSerializer, RoadmapSerializer, RoadmapStepSerializer, RoadmapEnrollmentSerializer
-from apps.ai_generation.services import generate_track_curriculum, generate_lesson_content, analyze_assessment_failure
+from .models import (
+    Track,
+    Module,
+    Lesson,
+    Assessment,
+    AssessmentAttempt,
+    Roadmap,
+    RoadmapStep,
+    RoadmapEnrollment,
+    FinalAssessment,
+    FinalAssessmentAttempt,
+    Certificate,
+)
+from .serializers import (
+    TrackSerializer,
+    ModuleSerializer,
+    LessonSerializer,
+    AssessmentSerializer,
+    AssessmentAttemptSerializer,
+    RoadmapSerializer,
+    RoadmapStepSerializer,
+    RoadmapEnrollmentSerializer,
+    FinalAssessmentSerializer,
+    FinalAssessmentAttemptSerializer,
+)
+from apps.ai_generation.services import (
+    generate_track_curriculum,
+    generate_lesson_content,
+    analyze_assessment_failure,
+    generate_final_assessment_questions,
+)
 import threading
+import uuid
 
 SUPER_ADMIN_EMAIL = "admin@remlearner.com"
 
@@ -94,6 +123,120 @@ def _get_roadmap_current_focus(roadmap, learner):
         last_completed_focus = focus
 
     return last_completed_focus
+
+
+def _get_request_learner(request):
+    from apps.accounts.models import Learner
+
+    learner = None
+    if not request.user.is_anonymous:
+        learner = Learner.objects.filter(email=request.user.email).first()
+
+    if not learner:
+        learner = Learner.objects.filter(email="operator@example.com").first()
+
+    return learner
+
+
+def _grade_questions(questions, user_answers):
+    correct_count = 0
+    total = len(questions)
+
+    for idx, q in enumerate(questions):
+        user_val = user_answers.get(str(idx))
+        correct_set = set(map(str, q.get('correct_answer', [q.get('correct_index')])))
+
+        if q.get('type') == 'multi_select':
+            user_set = set(map(str, user_val if isinstance(user_val, list) else [user_val] if user_val is not None else []))
+            if user_set == correct_set:
+                correct_count += 1
+        else:
+            if isinstance(user_val, list):
+                user_val = user_val[0] if user_val else None
+
+            if str(user_val) in correct_set and len(correct_set) == 1:
+                correct_count += 1
+            elif str(user_val) == str(q.get('correct_index')):
+                correct_count += 1
+
+    score = (correct_count / total * 100) if total > 0 else 0
+    return round(score, 1)
+
+
+def _build_track_final_assessment(track):
+    module_titles = list(track.modules.order_by('order').values_list('title', flat=True))
+    generated = generate_final_assessment_questions(
+        scope_type="track",
+        title=track.title,
+        description=track.description,
+        outline_items=module_titles,
+    )
+    if not generated:
+        return None
+
+    final_assessment, _ = FinalAssessment.objects.update_or_create(
+        track=track,
+        defaults={
+            "title": generated.get("title", f"{track.title} Final Evaluation"),
+            "description": generated.get("description", track.description),
+            "questions_data": generated.get("questions", []),
+            "passing_score": generated.get("passing_score", 85),
+            "time_limit_minutes": generated.get("time_limit_minutes", 60),
+        }
+    )
+    return final_assessment
+
+
+def _build_roadmap_final_assessment(roadmap):
+    outline_items = []
+    for step in roadmap.steps.all().order_by('order'):
+        if step.track:
+            outline_items.extend(
+                list(step.track.modules.order_by('order').values_list('title', flat=True))
+            )
+        else:
+            outline_items.append(step.title)
+
+    generated = generate_final_assessment_questions(
+        scope_type="roadmap",
+        title=roadmap.title,
+        description=roadmap.description,
+        outline_items=outline_items,
+    )
+    if not generated:
+        return None
+
+    final_assessment, _ = FinalAssessment.objects.update_or_create(
+        roadmap=roadmap,
+        defaults={
+            "title": generated.get("title", f"{roadmap.title} Final Evaluation"),
+            "description": generated.get("description", roadmap.description),
+            "questions_data": generated.get("questions", []),
+            "passing_score": generated.get("passing_score", 85),
+            "time_limit_minutes": generated.get("time_limit_minutes", 75),
+        }
+    )
+    return final_assessment
+
+
+def _issue_certificate(learner, final_attempt):
+    final_assessment = final_attempt.final_assessment
+    defaults = {
+        "final_assessment_attempt": final_attempt,
+        "certificate_code": uuid.uuid4().hex[:16].upper(),
+        "track": final_assessment.track,
+        "roadmap": final_assessment.roadmap,
+    }
+    certificate, _ = Certificate.objects.get_or_create(
+        learner=learner,
+        track=final_assessment.track,
+        roadmap=final_assessment.roadmap,
+        defaults=defaults,
+    )
+    if certificate.final_assessment_attempt_id != final_attempt.id:
+        certificate.final_assessment_attempt = final_attempt
+        certificate.save(update_fields=["final_assessment_attempt"])
+    return certificate
 
 def background_generate_content(track_id, learner_id):
     """
@@ -401,6 +544,91 @@ class TrackViewSet(viewsets.ModelViewSet):
         return Response({"status": "enrolled", "created": created})
 
     @action(detail=True, methods=['get'])
+    def final_assessment(self, request, pk=None):
+        track = self.get_object()
+        learner = _get_request_learner(request)
+        if not learner:
+            return Response({"error": "Profile not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        total_modules = track.modules.count()
+        completed_modules = AssessmentAttempt.objects.filter(
+            learner=learner,
+            assessment__module__track=track,
+            passed=True
+        ).values('assessment__module').distinct().count()
+
+        if total_modules == 0 or completed_modules < total_modules:
+            return Response({
+                "available": False,
+                "completed_modules": completed_modules,
+                "total_modules": total_modules,
+                "error": "Complete every module assessment before attempting the final evaluation."
+            }, status=status.HTTP_200_OK)
+
+        final_assessment = getattr(track, 'final_assessment', None)
+        if not final_assessment or not final_assessment.questions_data:
+            final_assessment = _build_track_final_assessment(track)
+
+        if not final_assessment:
+            return Response({"error": "Failed to prepare final assessment"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        return Response({
+            "available": True,
+            "assessment": FinalAssessmentSerializer(final_assessment, context={"request": request}).data
+        })
+
+    @action(detail=True, methods=['post'])
+    def submit_final_assessment(self, request, pk=None):
+        track = self.get_object()
+        learner = _get_request_learner(request)
+        if not learner:
+            return Response({"error": "Profile not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        final_assessment = getattr(track, 'final_assessment', None)
+        if not final_assessment:
+            return Response({"error": "Final assessment not ready"}, status=status.HTTP_400_BAD_REQUEST)
+
+        existing_attempt = FinalAssessmentAttempt.objects.filter(
+            final_assessment=final_assessment,
+            learner=learner
+        ).first()
+        if existing_attempt:
+            return Response(
+                {
+                    "error": "This final assessment has already been completed.",
+                    "attempt": FinalAssessmentAttemptSerializer(existing_attempt).data,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        answers = request.data.get('answers', {})
+        integrity_flags = request.data.get('integrity_flags', {}) or {}
+        violation_detected = any([
+            integrity_flags.get('tab_switch_count', 0) > 0,
+            integrity_flags.get('fullscreen_exit_count', 0) > 0,
+            integrity_flags.get('context_menu_count', 0) > 0,
+        ])
+
+        score = 0.0 if violation_detected else _grade_questions(final_assessment.questions_data, answers)
+        passed = (not violation_detected) and score >= final_assessment.passing_score
+        terminated_reason = "Integrity violation detected during proctored final evaluation." if violation_detected else ""
+
+        attempt = FinalAssessmentAttempt.objects.create(
+            learner=learner,
+            final_assessment=final_assessment,
+            answers_data=answers,
+            integrity_flags=integrity_flags,
+            score=score,
+            passed=passed,
+            terminated_reason=terminated_reason,
+        )
+
+        if passed:
+            _issue_certificate(learner, attempt)
+
+        return Response(FinalAssessmentAttemptSerializer(attempt).data)
+
+    @action(detail=True, methods=['get'])
     def enrolled_candidates(self, request, pk=None):
         # Only admins can see who enrolled
         if not request.user.is_staff:
@@ -476,6 +704,43 @@ class TrackViewSet(viewsets.ModelViewSet):
                     "attempts": attempts_data
                 } if assessment else None
             })
+
+        final_assessment_data = None
+        final_assessment = getattr(track, 'final_assessment', None)
+        if final_assessment:
+            final_attempts = FinalAssessmentAttempt.objects.filter(
+                final_assessment=final_assessment,
+                learner=learner
+            ).order_by('-created_at')
+
+            attempts_data = []
+            for attempt in final_attempts:
+                certificate = getattr(attempt, 'certificate', None)
+                attempts_data.append({
+                    "id": attempt.id,
+                    "score": attempt.score,
+                    "passed": attempt.passed,
+                    "answers": attempt.answers_data,
+                    "integrity_flags": attempt.integrity_flags,
+                    "terminated_reason": attempt.terminated_reason,
+                    "certificate": {
+                        "id": certificate.id,
+                        "certificate_code": certificate.certificate_code,
+                        "issued_at": certificate.issued_at,
+                    } if certificate else None,
+                    "created_at": attempt.created_at,
+                })
+
+            final_assessment_data = {
+                "id": final_assessment.id,
+                "title": final_assessment.title,
+                "description": final_assessment.description,
+                "passing_score": final_assessment.passing_score,
+                "time_limit_minutes": final_assessment.time_limit_minutes,
+                "questions": final_assessment.questions_data,
+                "attempt_count": final_attempts.count(),
+                "attempts": attempts_data,
+            }
             
         return Response({
             "learner": {
@@ -486,7 +751,8 @@ class TrackViewSet(viewsets.ModelViewSet):
                 "resume": learner.resume.url if learner.resume else None,
             },
             "personalized_summary": enrollment.personalized_summary,
-            "modules": modules_data
+            "modules": modules_data,
+            "final_assessment": final_assessment_data,
         })
 
 
@@ -907,6 +1173,92 @@ class RoadmapViewSet(viewsets.ModelViewSet):
             "message": "Roadmap is being finalized in the background.",
             "share_url": share_url
         })
+
+    @action(detail=True, methods=['get'])
+    def final_assessment(self, request, pk=None):
+        roadmap = self.get_object()
+        learner = _get_request_learner(request)
+        if not learner:
+            return Response({"error": "Profile not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        finalized_tracks = [step.track for step in roadmap.steps.all() if step.track]
+        total_modules = Module.objects.filter(track__in=finalized_tracks).count()
+        completed_modules = AssessmentAttempt.objects.filter(
+            learner=learner,
+            assessment__module__track__in=finalized_tracks,
+            passed=True
+        ).values('assessment__module').distinct().count() if finalized_tracks else 0
+
+        if total_modules == 0 or completed_modules < total_modules:
+            return Response({
+                "available": False,
+                "completed_modules": completed_modules,
+                "total_modules": total_modules,
+                "error": "Complete every track in the roadmap before attempting the final evaluation."
+            }, status=status.HTTP_200_OK)
+
+        final_assessment = getattr(roadmap, 'final_assessment', None)
+        if not final_assessment or not final_assessment.questions_data:
+            final_assessment = _build_roadmap_final_assessment(roadmap)
+
+        if not final_assessment:
+            return Response({"error": "Failed to prepare roadmap final assessment"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        return Response({
+            "available": True,
+            "assessment": FinalAssessmentSerializer(final_assessment, context={"request": request}).data
+        })
+
+    @action(detail=True, methods=['post'])
+    def submit_final_assessment(self, request, pk=None):
+        roadmap = self.get_object()
+        learner = _get_request_learner(request)
+        if not learner:
+            return Response({"error": "Profile not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        final_assessment = getattr(roadmap, 'final_assessment', None)
+        if not final_assessment:
+            return Response({"error": "Final assessment not ready"}, status=status.HTTP_400_BAD_REQUEST)
+
+        existing_attempt = FinalAssessmentAttempt.objects.filter(
+            final_assessment=final_assessment,
+            learner=learner
+        ).first()
+        if existing_attempt:
+            return Response(
+                {
+                    "error": "This final assessment has already been completed.",
+                    "attempt": FinalAssessmentAttemptSerializer(existing_attempt).data,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        answers = request.data.get('answers', {})
+        integrity_flags = request.data.get('integrity_flags', {}) or {}
+        violation_detected = any([
+            integrity_flags.get('tab_switch_count', 0) > 0,
+            integrity_flags.get('fullscreen_exit_count', 0) > 0,
+            integrity_flags.get('context_menu_count', 0) > 0,
+        ])
+
+        score = 0.0 if violation_detected else _grade_questions(final_assessment.questions_data, answers)
+        passed = (not violation_detected) and score >= final_assessment.passing_score
+        terminated_reason = "Integrity violation detected during proctored final evaluation." if violation_detected else ""
+
+        attempt = FinalAssessmentAttempt.objects.create(
+            learner=learner,
+            final_assessment=final_assessment,
+            answers_data=answers,
+            integrity_flags=integrity_flags,
+            score=score,
+            passed=passed,
+            terminated_reason=terminated_reason,
+        )
+
+        if passed:
+            _issue_certificate(learner, attempt)
+
+        return Response(FinalAssessmentAttemptSerializer(attempt).data)
 
     @action(detail=True, methods=['post'])
     def reorder_steps(self, request, pk=None):
