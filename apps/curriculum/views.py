@@ -27,6 +27,7 @@ from .serializers import (
     RoadmapEnrollmentSerializer,
     FinalAssessmentSerializer,
     FinalAssessmentAttemptSerializer,
+    CertificateSerializer,
 )
 from apps.ai_generation.services import (
     generate_track_curriculum,
@@ -163,13 +164,15 @@ def _grade_questions(questions, user_answers):
     return round(score, 1)
 
 
-def _build_track_final_assessment(track):
+def _build_track_final_assessment(track, previous_questions=None, attempt_number=1):
     module_titles = list(track.modules.order_by('order').values_list('title', flat=True))
     generated = generate_final_assessment_questions(
         scope_type="track",
         title=track.title,
         description=track.description,
         outline_items=module_titles,
+        previous_questions=previous_questions or [],
+        attempt_number=attempt_number,
     )
     if not generated:
         return None
@@ -181,13 +184,14 @@ def _build_track_final_assessment(track):
             "description": generated.get("description", track.description),
             "questions_data": generated.get("questions", []),
             "passing_score": generated.get("passing_score", 85),
-            "time_limit_minutes": generated.get("time_limit_minutes", 60),
+            "time_limit_minutes": generated.get("time_limit_minutes", 35),
+            "max_attempts": 3,
         }
     )
     return final_assessment
 
 
-def _build_roadmap_final_assessment(roadmap):
+def _build_roadmap_final_assessment(roadmap, previous_questions=None, attempt_number=1):
     outline_items = []
     for step in roadmap.steps.all().order_by('order'):
         if step.track:
@@ -202,6 +206,8 @@ def _build_roadmap_final_assessment(roadmap):
         title=roadmap.title,
         description=roadmap.description,
         outline_items=outline_items,
+        previous_questions=previous_questions or [],
+        attempt_number=attempt_number,
     )
     if not generated:
         return None
@@ -213,7 +219,8 @@ def _build_roadmap_final_assessment(roadmap):
             "description": generated.get("description", roadmap.description),
             "questions_data": generated.get("questions", []),
             "passing_score": generated.get("passing_score", 85),
-            "time_limit_minutes": generated.get("time_limit_minutes", 75),
+            "time_limit_minutes": generated.get("time_limit_minutes", 45),
+            "max_attempts": 3,
         }
     )
     return final_assessment
@@ -237,6 +244,56 @@ def _issue_certificate(learner, final_attempt):
         certificate.final_assessment_attempt = final_attempt
         certificate.save(update_fields=["final_assessment_attempt"])
     return certificate
+
+
+def _refresh_final_assessment_questions(final_assessment, previous_questions=None, attempt_number=1):
+    if final_assessment.track:
+        rebuilt = _build_track_final_assessment(
+            final_assessment.track,
+            previous_questions=previous_questions or [],
+            attempt_number=attempt_number,
+        )
+    elif final_assessment.roadmap:
+        rebuilt = _build_roadmap_final_assessment(
+            final_assessment.roadmap,
+            previous_questions=previous_questions or [],
+            attempt_number=attempt_number,
+        )
+    else:
+        rebuilt = None
+    return rebuilt or final_assessment
+
+
+def _collect_previous_final_question_texts(final_assessment, learner):
+    previous_questions = []
+    attempts_qs = FinalAssessmentAttempt.objects.filter(
+        final_assessment=final_assessment,
+        learner=learner
+    ).order_by('-attempt_number', '-created_at')
+    for attempt in attempts_qs:
+        for question in attempt.questions_snapshot or []:
+            question_text = question.get("question")
+            if question_text:
+                previous_questions.append(question_text)
+    return previous_questions
+
+
+def _prepare_retry_assessment(final_assessment, learner, next_attempt_number):
+    previous_questions = _collect_previous_final_question_texts(final_assessment, learner)
+    regenerated = _refresh_final_assessment_questions(
+        final_assessment,
+        previous_questions=previous_questions,
+        attempt_number=next_attempt_number,
+    )
+    regenerated.prepared_retry_questions_data = regenerated.questions_data
+    regenerated.prepared_retry_time_limit_minutes = regenerated.time_limit_minutes
+    regenerated.prepared_retry_attempt_number = next_attempt_number
+    regenerated.save(update_fields=[
+        "prepared_retry_questions_data",
+        "prepared_retry_time_limit_minutes",
+        "prepared_retry_attempt_number",
+    ])
+    return regenerated
 
 def background_generate_content(track_id, learner_id):
     """
@@ -572,8 +629,42 @@ class TrackViewSet(viewsets.ModelViewSet):
         if not final_assessment:
             return Response({"error": "Failed to prepare final assessment"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+        attempts_used = FinalAssessmentAttempt.objects.filter(
+            final_assessment=final_assessment,
+            learner=learner
+        ).count()
+        attempts_qs = FinalAssessmentAttempt.objects.filter(
+            final_assessment=final_assessment,
+            learner=learner
+        ).order_by('-attempt_number', '-created_at')
+        latest_attempt = attempts_qs.first()
+
+        if latest_attempt and not latest_attempt.passed and attempts_used < final_assessment.max_attempts:
+            if (
+                final_assessment.prepared_retry_attempt_number == attempts_used + 1
+                and final_assessment.prepared_retry_questions_data
+            ):
+                final_assessment.questions_data = final_assessment.prepared_retry_questions_data
+                final_assessment.time_limit_minutes = final_assessment.prepared_retry_time_limit_minutes
+                final_assessment.prepared_retry_questions_data = []
+                final_assessment.prepared_retry_time_limit_minutes = 0
+                final_assessment.prepared_retry_attempt_number = 0
+                final_assessment.save(update_fields=[
+                    "questions_data",
+                    "time_limit_minutes",
+                    "prepared_retry_questions_data",
+                    "prepared_retry_time_limit_minutes",
+                    "prepared_retry_attempt_number",
+                ])
+            else:
+                final_assessment = _prepare_retry_assessment(final_assessment, learner, attempts_used + 1)
+                final_assessment.questions_data = final_assessment.prepared_retry_questions_data
+                final_assessment.time_limit_minutes = final_assessment.prepared_retry_time_limit_minutes
+
         return Response({
-            "available": True,
+            "available": attempts_used < final_assessment.max_attempts and not (latest_attempt and latest_attempt.passed),
+            "attempts_used": attempts_used,
+            "attempts_remaining": max(final_assessment.max_attempts - attempts_used, 0),
             "assessment": FinalAssessmentSerializer(final_assessment, context={"request": request}).data
         })
 
@@ -588,15 +679,27 @@ class TrackViewSet(viewsets.ModelViewSet):
         if not final_assessment:
             return Response({"error": "Final assessment not ready"}, status=status.HTTP_400_BAD_REQUEST)
 
-        existing_attempt = FinalAssessmentAttempt.objects.filter(
+        attempts_qs = FinalAssessmentAttempt.objects.filter(
             final_assessment=final_assessment,
             learner=learner
-        ).first()
-        if existing_attempt:
+        ).order_by('-attempt_number', '-created_at')
+        latest_attempt = attempts_qs.first()
+        attempts_used = attempts_qs.count()
+
+        if latest_attempt and latest_attempt.passed:
             return Response(
                 {
-                    "error": "This final assessment has already been completed.",
-                    "attempt": FinalAssessmentAttemptSerializer(existing_attempt).data,
+                    "error": "This final assessment has already been passed.",
+                    "attempt": FinalAssessmentAttemptSerializer(latest_attempt).data,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if attempts_used >= final_assessment.max_attempts:
+            return Response(
+                {
+                    "error": "Maximum final assessment attempts reached.",
+                    "attempts_used": attempts_used,
+                    "max_attempts": final_assessment.max_attempts,
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -607,24 +710,33 @@ class TrackViewSet(viewsets.ModelViewSet):
             integrity_flags.get('tab_switch_count', 0) > 0,
             integrity_flags.get('fullscreen_exit_count', 0) > 0,
             integrity_flags.get('context_menu_count', 0) > 0,
+            integrity_flags.get('timed_out', 0) > 0,
         ])
 
         score = 0.0 if violation_detected else _grade_questions(final_assessment.questions_data, answers)
         passed = (not violation_detected) and score >= final_assessment.passing_score
-        terminated_reason = "Integrity violation detected during proctored final evaluation." if violation_detected else ""
+        terminated_reason = ""
+        if integrity_flags.get('timed_out', 0) > 0:
+            terminated_reason = "Final evaluation timed out before submission."
+        elif violation_detected:
+            terminated_reason = "Integrity violation detected during proctored final evaluation."
 
         attempt = FinalAssessmentAttempt.objects.create(
             learner=learner,
             final_assessment=final_assessment,
+            questions_snapshot=final_assessment.questions_data,
             answers_data=answers,
             integrity_flags=integrity_flags,
             score=score,
             passed=passed,
             terminated_reason=terminated_reason,
+            attempt_number=attempts_used + 1,
         )
 
         if passed:
             _issue_certificate(learner, attempt)
+        elif attempts_used + 1 < final_assessment.max_attempts:
+            _prepare_retry_assessment(final_assessment, learner, attempts_used + 2)
 
         return Response(FinalAssessmentAttemptSerializer(attempt).data)
 
@@ -720,6 +832,7 @@ class TrackViewSet(viewsets.ModelViewSet):
                     "id": attempt.id,
                     "score": attempt.score,
                     "passed": attempt.passed,
+                    "questions_snapshot": attempt.questions_snapshot,
                     "answers": attempt.answers_data,
                     "integrity_flags": attempt.integrity_flags,
                     "terminated_reason": attempt.terminated_reason,
@@ -1204,8 +1317,42 @@ class RoadmapViewSet(viewsets.ModelViewSet):
         if not final_assessment:
             return Response({"error": "Failed to prepare roadmap final assessment"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+        attempts_used = FinalAssessmentAttempt.objects.filter(
+            final_assessment=final_assessment,
+            learner=learner
+        ).count()
+        attempts_qs = FinalAssessmentAttempt.objects.filter(
+            final_assessment=final_assessment,
+            learner=learner
+        ).order_by('-attempt_number', '-created_at')
+        latest_attempt = attempts_qs.first()
+
+        if latest_attempt and not latest_attempt.passed and attempts_used < final_assessment.max_attempts:
+            if (
+                final_assessment.prepared_retry_attempt_number == attempts_used + 1
+                and final_assessment.prepared_retry_questions_data
+            ):
+                final_assessment.questions_data = final_assessment.prepared_retry_questions_data
+                final_assessment.time_limit_minutes = final_assessment.prepared_retry_time_limit_minutes
+                final_assessment.prepared_retry_questions_data = []
+                final_assessment.prepared_retry_time_limit_minutes = 0
+                final_assessment.prepared_retry_attempt_number = 0
+                final_assessment.save(update_fields=[
+                    "questions_data",
+                    "time_limit_minutes",
+                    "prepared_retry_questions_data",
+                    "prepared_retry_time_limit_minutes",
+                    "prepared_retry_attempt_number",
+                ])
+            else:
+                final_assessment = _prepare_retry_assessment(final_assessment, learner, attempts_used + 1)
+                final_assessment.questions_data = final_assessment.prepared_retry_questions_data
+                final_assessment.time_limit_minutes = final_assessment.prepared_retry_time_limit_minutes
+
         return Response({
-            "available": True,
+            "available": attempts_used < final_assessment.max_attempts and not (latest_attempt and latest_attempt.passed),
+            "attempts_used": attempts_used,
+            "attempts_remaining": max(final_assessment.max_attempts - attempts_used, 0),
             "assessment": FinalAssessmentSerializer(final_assessment, context={"request": request}).data
         })
 
@@ -1220,15 +1367,27 @@ class RoadmapViewSet(viewsets.ModelViewSet):
         if not final_assessment:
             return Response({"error": "Final assessment not ready"}, status=status.HTTP_400_BAD_REQUEST)
 
-        existing_attempt = FinalAssessmentAttempt.objects.filter(
+        attempts_qs = FinalAssessmentAttempt.objects.filter(
             final_assessment=final_assessment,
             learner=learner
-        ).first()
-        if existing_attempt:
+        ).order_by('-attempt_number', '-created_at')
+        latest_attempt = attempts_qs.first()
+        attempts_used = attempts_qs.count()
+
+        if latest_attempt and latest_attempt.passed:
             return Response(
                 {
-                    "error": "This final assessment has already been completed.",
-                    "attempt": FinalAssessmentAttemptSerializer(existing_attempt).data,
+                    "error": "This final assessment has already been passed.",
+                    "attempt": FinalAssessmentAttemptSerializer(latest_attempt).data,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if attempts_used >= final_assessment.max_attempts:
+            return Response(
+                {
+                    "error": "Maximum final assessment attempts reached.",
+                    "attempts_used": attempts_used,
+                    "max_attempts": final_assessment.max_attempts,
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -1239,24 +1398,33 @@ class RoadmapViewSet(viewsets.ModelViewSet):
             integrity_flags.get('tab_switch_count', 0) > 0,
             integrity_flags.get('fullscreen_exit_count', 0) > 0,
             integrity_flags.get('context_menu_count', 0) > 0,
+            integrity_flags.get('timed_out', 0) > 0,
         ])
 
         score = 0.0 if violation_detected else _grade_questions(final_assessment.questions_data, answers)
         passed = (not violation_detected) and score >= final_assessment.passing_score
-        terminated_reason = "Integrity violation detected during proctored final evaluation." if violation_detected else ""
+        terminated_reason = ""
+        if integrity_flags.get('timed_out', 0) > 0:
+            terminated_reason = "Final evaluation timed out before submission."
+        elif violation_detected:
+            terminated_reason = "Integrity violation detected during proctored final evaluation."
 
         attempt = FinalAssessmentAttempt.objects.create(
             learner=learner,
             final_assessment=final_assessment,
+            questions_snapshot=final_assessment.questions_data,
             answers_data=answers,
             integrity_flags=integrity_flags,
             score=score,
             passed=passed,
             terminated_reason=terminated_reason,
+            attempt_number=attempts_used + 1,
         )
 
         if passed:
             _issue_certificate(learner, attempt)
+        elif attempts_used + 1 < final_assessment.max_attempts:
+            _prepare_retry_assessment(final_assessment, learner, attempts_used + 2)
 
         return Response(FinalAssessmentAttemptSerializer(attempt).data)
 
@@ -1337,3 +1505,14 @@ class RoadmapEnrollmentViewSet(viewsets.ReadOnlyModelViewSet):
         if not learner:
             return RoadmapEnrollment.objects.none()
         return RoadmapEnrollment.objects.filter(learner=learner)
+
+
+class CertificateViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = Certificate.objects.select_related(
+        'learner',
+        'track',
+        'roadmap',
+        'final_assessment_attempt',
+    )
+    serializer_class = CertificateSerializer
+    lookup_field = 'certificate_code'

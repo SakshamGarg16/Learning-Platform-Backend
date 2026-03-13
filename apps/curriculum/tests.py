@@ -288,6 +288,7 @@ class FinalAssessmentTests(TestCase):
         response = self.client.get(f'/api/tracks/{self.track.id}/final_assessment/')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()['available'], True)
+        self.assertEqual(response.json()['attempts_remaining'], 3)
 
         submit_response = self.client.post(
             f'/api/tracks/{self.track.id}/submit_final_assessment/',
@@ -299,23 +300,36 @@ class FinalAssessmentTests(TestCase):
         self.assertTrue(submit_response.json()['passed'])
         self.assertEqual(Certificate.objects.count(), 1)
         self.assertEqual(FinalAssessmentAttempt.objects.count(), 1)
+        self.assertEqual(submit_response.json()['attempt_number'], 1)
 
     @patch('apps.curriculum.views.generate_final_assessment_questions')
     def test_roadmap_final_assessment_integrity_failure(self, mock_generate):
         self.client.force_login(self.user)
-        mock_generate.return_value = {
-            "title": "Roadmap Final",
-            "description": "Hard mode",
-            "passing_score": 85,
-            "time_limit_minutes": 75,
-            "questions": [
-                {"question": "Hard Q1", "options": ["A", "B"], "correct_answer": [0], "type": "mcq"}
-            ]
-        }
+        mock_generate.side_effect = [
+            {
+                "title": "Roadmap Final",
+                "description": "Hard mode",
+                "passing_score": 85,
+                "time_limit_minutes": 30,
+                "questions": [
+                    {"question": "Hard Q1", "options": ["A", "B"], "correct_answer": [0], "type": "mcq"}
+                ]
+            },
+            {
+                "title": "Roadmap Final Retry",
+                "description": "Harder mode",
+                "passing_score": 85,
+                "time_limit_minutes": 30,
+                "questions": [
+                    {"question": "Hard Q2", "options": ["A", "B"], "correct_answer": [1], "type": "mcq"}
+                ]
+            }
+        ]
 
         response = self.client.get(f'/api/roadmaps/{self.roadmap.id}/final_assessment/')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()['available'], True)
+        self.assertEqual(response.json()['attempts_remaining'], 3)
 
         submit_response = self.client.post(
             f'/api/roadmaps/{self.roadmap.id}/submit_final_assessment/',
@@ -326,6 +340,15 @@ class FinalAssessmentTests(TestCase):
         self.assertEqual(submit_response.status_code, 200)
         self.assertFalse(submit_response.json()['passed'])
         self.assertEqual(submit_response.json()['terminated_reason'], "Integrity violation detected during proctored final evaluation.")
+        self.assertEqual(submit_response.json()['attempt_number'], 1)
+
+        followup_response = self.client.get(f'/api/roadmaps/{self.roadmap.id}/final_assessment/')
+        self.assertEqual(followup_response.status_code, 200)
+        self.assertEqual(followup_response.json()['available'], True)
+        self.assertEqual(followup_response.json()['attempts_remaining'], 2)
+        self.assertEqual(followup_response.json()['assessment']['questions_data'][0]['question'], "Hard Q2")
+        latest_attempt = FinalAssessmentAttempt.objects.order_by('-attempt_number').first()
+        self.assertEqual(latest_attempt.questions_snapshot[0]['question'], "Hard Q1")
 
 class LessonTests(TestCase):
     def setUp(self):

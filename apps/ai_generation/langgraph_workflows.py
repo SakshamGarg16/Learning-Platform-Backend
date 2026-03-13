@@ -1,9 +1,34 @@
 import operator
 import json
+import math
+import random
+import re
 from typing import TypedDict, Annotated, List, Dict
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Send
 from google import genai
+
+
+def _extract_json_array(text: str):
+    if not text:
+        return []
+
+    cleaned = text.strip().replace("```json", "").replace("```", "").strip()
+    start = cleaned.find('[')
+    end = cleaned.rfind(']')
+    if start != -1 and end != -1 and end > start:
+        cleaned = cleaned[start:end + 1]
+
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        # Escape stray backslashes that are not part of valid JSON escape sequences.
+        repaired = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', cleaned)
+        try:
+            return json.loads(repaired)
+        except Exception as e:
+            print(f"Error parsing JSON array payload: {e}")
+            return []
 
 class LessonState(TypedDict):
     track_title: str
@@ -428,3 +453,149 @@ roadmap_workflow.add_edge("generate_roadmap_structure", "store_generated_roadmap
 roadmap_workflow.add_edge("store_generated_roadmap", END)
 
 roadmap_generator_app = roadmap_workflow.compile()
+
+
+# --- FINAL ASSESSMENT WORKFLOW ---
+
+class FinalAssessmentModuleQuestionState(TypedDict):
+    scope_type: str
+    scope_title: str
+    scope_description: str
+    module_titles: List[str]
+    question_count: int
+    previous_questions: List[str]
+    attempt_number: int
+
+
+class FinalAssessmentState(TypedDict):
+    scope_type: str
+    scope_title: str
+    scope_description: str
+    module_titles: List[str]
+    question_count_per_module: int
+    module_batches: List[List[str]]
+    previous_questions: List[str]
+    attempt_number: int
+    generated_question_sets: Annotated[List[List[dict]], operator.add]
+    final_questions: List[dict]
+    time_limit_minutes: int
+    passing_score: int
+
+
+def prepare_final_assessment_modules(state: FinalAssessmentState):
+    module_count = max(len(state.get("module_titles", [])), 1)
+    total_target = 18 if state.get("scope_type") == "track" else 24
+    question_count_per_module = max(2, math.ceil(total_target / module_count))
+    module_titles = state.get("module_titles", [])
+    batch_size = 3 if module_count >= 6 else 2
+    module_batches = [
+        module_titles[index:index + batch_size]
+        for index in range(0, len(module_titles), batch_size)
+    ] or [module_titles]
+    return {
+        **state,
+        "question_count_per_module": question_count_per_module,
+        "module_batches": module_batches,
+    }
+
+
+def map_final_assessment_modules(state: FinalAssessmentState):
+    return [
+        Send(
+            "generate_final_module_questions",
+            {
+                "scope_type": state["scope_type"],
+                "scope_title": state["scope_title"],
+                "scope_description": state["scope_description"],
+                "module_titles": module_batch,
+                "question_count": max(2, len(module_batch) * state.get("question_count_per_module", 2)),
+                "previous_questions": state.get("previous_questions", []),
+                "attempt_number": state.get("attempt_number", 1),
+            }
+        )
+        for module_batch in state.get("module_batches", [])
+    ]
+
+
+def generate_final_module_questions(state: FinalAssessmentModuleQuestionState):
+    from .services import client, DEFAULT_MODEL
+
+    if not client:
+        return {"generated_question_sets": [[]]}
+
+    prompt = f"""
+    You are an elite certification examiner.
+
+    Create advanced final-evaluation questions for one module of a larger {state['scope_type']} certification.
+
+    Scope title: {state['scope_title']}
+    Scope description: {state['scope_description']}
+    Module coverage batch: {json.dumps(state['module_titles'])}
+    Attempt number: {state.get('attempt_number', 1)}
+
+    Previously used questions that MUST NOT be repeated or trivially reworded:
+    {json.dumps(state.get('previous_questions', []), indent=2)}
+
+    Requirements:
+    1. Generate exactly {state.get('question_count', 2)} high-quality questions covering all modules in this batch.
+    2. Questions must be significantly harder than standard module quizzes.
+    3. Favor scenario-based engineering judgment, debugging tradeoffs, architecture reasoning, and failure analysis.
+    4. Use these types only: `mcq`, `boolean`, `multi_select`.
+    5. Do not repeat previously used questions, answer structures, or near-duplicates.
+    6. Distribute questions across the modules in the batch instead of focusing on only one.
+
+    Return only a JSON array:
+    [
+      {{
+        "question": "Question text",
+        "type": "mcq",
+        "options": ["A", "B", "C", "D"],
+        "correct_answer": [1],
+        "explanation": "Why this is correct",
+        "module_titles": {json.dumps(state['module_titles'])}
+      }}
+    ]
+    """
+
+    response = client.models.generate_content(
+        model=DEFAULT_MODEL,
+        contents=prompt,
+        config=genai.types.GenerateContentConfig(
+            response_mime_type="application/json",
+            temperature=0.3,
+        ),
+    )
+
+    parsed = _extract_json_array(response.text)
+    if not isinstance(parsed, list):
+        parsed = []
+
+    return {"generated_question_sets": [parsed]}
+
+
+def aggregate_final_assessment_questions(state: FinalAssessmentState):
+    question_sets = state.get("generated_question_sets", [])
+    questions = [question for question_set in question_sets for question in question_set]
+    random.shuffle(questions)
+
+    question_count = len(questions)
+    time_limit_minutes = min(45, max(20, math.ceil(question_count * 1.5)))
+    passing_score = 85
+
+    return {
+        "final_questions": questions,
+        "time_limit_minutes": time_limit_minutes,
+        "passing_score": passing_score,
+    }
+
+
+final_assessment_workflow = StateGraph(FinalAssessmentState)
+final_assessment_workflow.add_node("prepare_final_assessment_modules", prepare_final_assessment_modules)
+final_assessment_workflow.add_node("generate_final_module_questions", generate_final_module_questions)
+final_assessment_workflow.add_node("aggregate_final_assessment_questions", aggregate_final_assessment_questions)
+final_assessment_workflow.add_edge(START, "prepare_final_assessment_modules")
+final_assessment_workflow.add_conditional_edges("prepare_final_assessment_modules", map_final_assessment_modules, ["generate_final_module_questions"])
+final_assessment_workflow.add_edge("generate_final_module_questions", "aggregate_final_assessment_questions")
+final_assessment_workflow.add_edge("aggregate_final_assessment_questions", END)
+
+final_assessment_generator_app = final_assessment_workflow.compile()

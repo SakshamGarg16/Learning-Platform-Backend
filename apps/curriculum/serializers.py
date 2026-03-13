@@ -73,9 +73,53 @@ class AssessmentSerializer(serializers.ModelSerializer):
 
 
 class CertificateSerializer(serializers.ModelSerializer):
+    learner_name = serializers.SerializerMethodField()
+    learner_email = serializers.SerializerMethodField()
+    issued_for_title = serializers.SerializerMethodField()
+    scope_type = serializers.SerializerMethodField()
+    score = serializers.SerializerMethodField()
+    verification_code = serializers.CharField(source='certificate_code', read_only=True)
+
     class Meta:
         model = Certificate
-        fields = ['id', 'certificate_code', 'issued_at', 'track', 'roadmap']
+        fields = [
+            'id',
+            'certificate_code',
+            'verification_code',
+            'issued_at',
+            'track',
+            'roadmap',
+            'learner_name',
+            'learner_email',
+            'issued_for_title',
+            'scope_type',
+            'score',
+        ]
+
+    def get_learner_name(self, obj):
+        return obj.learner.full_name
+
+    def get_learner_email(self, obj):
+        return obj.learner.email
+
+    def get_issued_for_title(self, obj):
+        if obj.track:
+            return obj.track.title
+        if obj.roadmap:
+            return obj.roadmap.title
+        return 'RemLearners Certification'
+
+    def get_scope_type(self, obj):
+        if obj.track:
+            return 'track'
+        if obj.roadmap:
+            return 'roadmap'
+        return 'certificate'
+
+    def get_score(self, obj):
+        if obj.final_assessment_attempt and obj.final_assessment_attempt.score is not None:
+            return round(obj.final_assessment_attempt.score, 1)
+        return None
 
 
 class FinalAssessmentAttemptSerializer(serializers.ModelSerializer):
@@ -84,8 +128,8 @@ class FinalAssessmentAttemptSerializer(serializers.ModelSerializer):
     class Meta:
         model = FinalAssessmentAttempt
         fields = [
-            'id', 'learner', 'final_assessment', 'answers_data', 'integrity_flags',
-            'score', 'passed', 'terminated_reason', 'certificate', 'created_at'
+            'id', 'learner', 'final_assessment', 'questions_snapshot', 'answers_data', 'integrity_flags',
+            'score', 'passed', 'terminated_reason', 'certificate', 'attempt_number', 'created_at'
         ]
         read_only_fields = ['score', 'passed', 'terminated_reason', 'certificate', 'created_at']
 
@@ -97,7 +141,7 @@ class FinalAssessmentSerializer(serializers.ModelSerializer):
         model = FinalAssessment
         fields = [
             'id', 'title', 'description', 'questions_data', 'passing_score',
-            'time_limit_minutes', 'user_latest_attempt'
+            'time_limit_minutes', 'max_attempts', 'user_latest_attempt'
         ]
 
     def get_user_latest_attempt(self, obj):
@@ -303,6 +347,8 @@ class TrackSerializer(serializers.ModelSerializer):
             "available": total_modules > 0 and completed_modules >= total_modules,
             "completed_modules": completed_modules,
             "total_modules": total_modules,
+            "attempts_used": FinalAssessmentAttempt.objects.filter(final_assessment=final_assessment, learner=learner).count() if final_assessment and learner else 0,
+            "attempts_remaining": max((final_assessment.max_attempts if final_assessment else 3) - FinalAssessmentAttempt.objects.filter(final_assessment=final_assessment, learner=learner).count(), 0) if final_assessment and learner else (final_assessment.max_attempts if final_assessment else 3),
             "assessment": FinalAssessmentSerializer(final_assessment, context=self.context).data if final_assessment else None,
             "passed": latest_attempt.passed if latest_attempt else False,
             "certificate": CertificateSerializer(certificate).data if certificate else None,
@@ -451,6 +497,8 @@ class RoadmapSerializer(serializers.ModelSerializer):
             "available": bool(finalized_tracks) and total_modules > 0 and completed_modules >= total_modules,
             "completed_modules": completed_modules,
             "total_modules": total_modules,
+            "attempts_used": FinalAssessmentAttempt.objects.filter(final_assessment=final_assessment, learner=learner).count() if final_assessment and learner else 0,
+            "attempts_remaining": max((final_assessment.max_attempts if final_assessment else 3) - FinalAssessmentAttempt.objects.filter(final_assessment=final_assessment, learner=learner).count(), 0) if final_assessment and learner else (final_assessment.max_attempts if final_assessment else 3),
             "assessment": FinalAssessmentSerializer(final_assessment, context=self.context).data if final_assessment else None,
             "passed": latest_attempt.passed if latest_attempt else False,
             "certificate": CertificateSerializer(certificate).data if certificate else None,

@@ -111,8 +111,12 @@ class FinalAssessment(models.Model):
     title = models.CharField(max_length=255, default="Final Evaluation")
     description = models.TextField(blank=True)
     questions_data = models.JSONField(default=list, help_text="JSON array of advanced final evaluation questions")
+    prepared_retry_questions_data = models.JSONField(default=list, blank=True)
+    prepared_retry_time_limit_minutes = models.PositiveIntegerField(default=0)
+    prepared_retry_attempt_number = models.PositiveIntegerField(default=0)
     passing_score = models.FloatField(default=80.0)
     time_limit_minutes = models.PositiveIntegerField(default=45)
+    max_attempts = models.PositiveIntegerField(default=3)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -125,15 +129,14 @@ class FinalAssessmentAttempt(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     learner = models.ForeignKey(Learner, on_delete=models.CASCADE, related_name='final_assessment_attempts')
     final_assessment = models.ForeignKey(FinalAssessment, on_delete=models.CASCADE, related_name='attempts')
+    questions_snapshot = models.JSONField(default=list)
     answers_data = models.JSONField(default=dict)
     integrity_flags = models.JSONField(default=dict, blank=True)
     score = models.FloatField(null=True, blank=True)
     passed = models.BooleanField(default=False)
     terminated_reason = models.CharField(max_length=255, blank=True)
+    attempt_number = models.PositiveIntegerField(default=1)
     created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        unique_together = ('learner', 'final_assessment')
 
     def __str__(self):
         return f"{self.learner.email} - {self.final_assessment.title} - {self.score}"
