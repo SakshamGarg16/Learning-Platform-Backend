@@ -10,6 +10,91 @@ import threading
 
 SUPER_ADMIN_EMAIL = "admin@remlearner.com"
 
+
+def _calculate_track_progress(track, learner):
+    total_modules = track.modules.count()
+    if total_modules == 0:
+        return 0.0
+
+    passed_assessments = AssessmentAttempt.objects.filter(
+        learner=learner,
+        assessment__module__track=track,
+        passed=True
+    ).values('assessment__module').distinct().count()
+
+    return round((passed_assessments / total_modules) * 100, 1)
+
+
+def _calculate_roadmap_progress(roadmap, learner):
+    finalized_tracks = Track.objects.filter(roadmap_steps__roadmap=roadmap).distinct()
+    total_modules = Module.objects.filter(track__in=finalized_tracks).count()
+    if total_modules == 0:
+        return 0.0
+
+    passed_assessments = AssessmentAttempt.objects.filter(
+        learner=learner,
+        assessment__module__track__in=finalized_tracks,
+        passed=True
+    ).values('assessment__module').distinct().count()
+
+    return round((passed_assessments / total_modules) * 100, 1)
+
+
+def _get_current_module_summary(track, learner):
+    modules = list(track.modules.all().order_by('order'))
+    if not modules:
+        return None
+
+    for module in modules:
+        is_completed = AssessmentAttempt.objects.filter(
+            learner=learner,
+            assessment__module=module,
+            passed=True
+        ).exists()
+
+        if not is_completed:
+            return {
+                "id": module.id,
+                "title": module.title,
+                "order": module.order,
+                "status": "in_progress",
+            }
+
+    last_module = modules[-1]
+    return {
+        "id": last_module.id,
+        "title": last_module.title,
+        "order": last_module.order,
+        "status": "completed",
+    }
+
+
+def _get_roadmap_current_focus(roadmap, learner):
+    ordered_steps = roadmap.steps.all().order_by('order')
+    last_completed_focus = None
+
+    for step in ordered_steps:
+        if not step.track:
+            continue
+
+        progress = _calculate_track_progress(step.track, learner)
+        current_module = _get_current_module_summary(step.track, learner)
+        focus = {
+            "step_id": step.id,
+            "step_title": step.title,
+            "track_id": step.track.id,
+            "track_title": step.track.title,
+            "progress": progress,
+            "current_module": current_module,
+        }
+
+        if progress < 100.0:
+            return focus
+
+        last_completed_focus = focus
+
+    return last_completed_focus
+
 def background_generate_content(track_id, learner_id):
     """
     Background worker function (Threaded) to pre-generate all lessons 
@@ -327,23 +412,13 @@ class TrackViewSet(viewsets.ModelViewSet):
         
         data = []
         for enc in enrollments:
-            # Simple progress calculation: (passed assessments / total modules)
-            total_modules = track.modules.count()
-            passed_assessments = AssessmentAttempt.objects.filter(
-                learner=enc.learner,
-                assessment__module__track=track,
-                passed=True
-            ).values('assessment__module').distinct().count()
-            
-            progress = (passed_assessments / total_modules * 100) if total_modules > 0 else 0
-            
             data.append({
                 "id": enc.learner.id,
                 "name": enc.learner.full_name,
                 "email": enc.learner.email,
                 "phone": enc.learner.phone_number,
                 "resume": enc.learner.resume.url if enc.learner.resume else None,
-                "progress": round(progress, 1),
+                "progress": _calculate_track_progress(track, enc.learner),
                 "enrolled_at": enc.enrolled_at
             })
             
@@ -719,6 +794,50 @@ class RoadmapViewSet(viewsets.ModelViewSet):
                 thread.start()
             
         return Response({"status": "enrolled", "created": created})
+
+    @action(detail=True, methods=['get'])
+    def enrolled_candidates(self, request, pk=None):
+        if not request.user.is_staff:
+            return Response({"error": "Unauthorized"}, status=status.HTTP_403_FORBIDDEN)
+
+        roadmap = self.get_object()
+        enrollments = RoadmapEnrollment.objects.filter(roadmap=roadmap).select_related('learner')
+
+        data = []
+        for enrollment in enrollments:
+            learner = enrollment.learner
+            step_progress = []
+
+            for step in roadmap.steps.all().order_by('order'):
+                track_progress = None
+                current_module = None
+                if step.track:
+                    track_progress = _calculate_track_progress(step.track, learner)
+                    current_module = _get_current_module_summary(step.track, learner)
+
+                step_progress.append({
+                    "step_id": step.id,
+                    "step_title": step.title,
+                    "track_id": step.track.id if step.track else None,
+                    "track_title": step.track.title if step.track else None,
+                    "progress": track_progress,
+                    "is_completed": track_progress == 100.0 if track_progress is not None else False,
+                    "current_module": current_module,
+                })
+
+            data.append({
+                "id": learner.id,
+                "name": learner.full_name,
+                "email": learner.email,
+                "phone": learner.phone_number,
+                "resume": learner.resume.url if learner.resume else None,
+                "progress": _calculate_roadmap_progress(roadmap, learner),
+                "enrolled_at": enrollment.enrolled_at,
+                "current_focus": _get_roadmap_current_focus(roadmap, learner),
+                "steps": step_progress,
+            })
+
+        return Response(data)
 
     @action(detail=True, methods=['post'])
     def finalize_step(self, request, pk=None):

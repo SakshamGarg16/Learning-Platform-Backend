@@ -4,7 +4,7 @@ from django.test import TestCase, Client
 from django.contrib.auth.models import User
 from rest_framework import status
 from apps.accounts.models import Learner
-from .models import Track, Module, Lesson, Assessment, AssessmentAttempt, TrackEnrollment
+from .models import Track, Module, Lesson, Assessment, AssessmentAttempt, TrackEnrollment, Roadmap, RoadmapStep, RoadmapEnrollment
 
 class CurriculumTests(TestCase):
     def setUp(self):
@@ -175,6 +175,65 @@ class TrackAdminTests(TestCase):
         response = self.client.get(url)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()['learner']['email'], "student@tracks.com")
+
+
+class RoadmapAdminTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.admin = User.objects.create_user(username="admin@roadmaps.com", email="admin@roadmaps.com", is_staff=True)
+        self.learner_user = User.objects.create_user(username="student@roadmaps.com", email="student@roadmaps.com")
+        self.learner = Learner.objects.create(email="student@roadmaps.com", full_name="Roadmap Student", auth_user_id="roadmap_student")
+
+        self.roadmap = Roadmap.objects.create(title="Backend Roadmap", description="Plan")
+        self.track_1 = Track.objects.create(title="Track 1", description="First")
+        self.track_2 = Track.objects.create(title="Track 2", description="Second")
+
+        self.step_1 = RoadmapStep.objects.create(roadmap=self.roadmap, title="Step 1", order=0, track=self.track_1)
+        self.step_2 = RoadmapStep.objects.create(roadmap=self.roadmap, title="Step 2", order=1, track=self.track_2)
+
+        self.module_1 = Module.objects.create(track=self.track_1, title="Module 1", order=0)
+        self.module_2 = Module.objects.create(track=self.track_2, title="Module 2", order=0)
+        self.assessment_1 = Assessment.objects.create(module=self.module_1, title="A1", questions_data=[])
+        self.assessment_2 = Assessment.objects.create(module=self.module_2, title="A2", questions_data=[])
+
+        RoadmapEnrollment.objects.create(learner=self.learner, roadmap=self.roadmap)
+        AssessmentAttempt.objects.create(
+            learner=self.learner,
+            assessment=self.assessment_1,
+            answers_data={},
+            score=100,
+            passed=True
+        )
+
+    def test_enrolled_candidates_list(self):
+        self.client.force_login(self.admin)
+        url = f'/api/roadmaps/{self.roadmap.id}/enrolled_candidates/'
+
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]['email'], "student@roadmaps.com")
+        self.assertEqual(data[0]['progress'], 50.0)
+        self.assertEqual(data[0]['current_focus']['step_id'], str(self.step_2.id))
+        self.assertEqual(data[0]['current_focus']['current_module']['id'], str(self.module_2.id))
+        self.assertEqual(data[0]['current_focus']['current_module']['title'], "Module 2")
+        self.assertEqual(len(data[0]['steps']), 2)
+        self.assertEqual(data[0]['steps'][0]['progress'], 100.0)
+        self.assertEqual(data[0]['steps'][0]['is_completed'], True)
+        self.assertEqual(data[0]['steps'][0]['current_module']['id'], str(self.module_1.id))
+        self.assertEqual(data[0]['steps'][1]['progress'], 0.0)
+        self.assertEqual(data[0]['steps'][1]['is_completed'], False)
+        self.assertEqual(data[0]['steps'][1]['current_module']['id'], str(self.module_2.id))
+
+    def test_enrolled_candidates_requires_admin(self):
+        self.client.force_login(self.learner_user)
+        url = f'/api/roadmaps/{self.roadmap.id}/enrolled_candidates/'
+
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 403)
 
 class LessonTests(TestCase):
     def setUp(self):
